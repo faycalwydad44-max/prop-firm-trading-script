@@ -3,6 +3,8 @@ import { pool } from "@/db";
 
 export const dynamic = "force-dynamic";
 
+type Row = Record<string, unknown>;
+
 type Candle = {
   time: number;
   open: number;
@@ -11,13 +13,7 @@ type Candle = {
   close: number;
 };
 
-type Sweep = {
-  direction: "BUY" | "SELL";
-  candle: Candle;
-  level: number;
-};
-
-function parseCandles(rows: Record<string, unknown>[]): Candle[] {
+function toCandles(rows: Row[]): Candle[] {
   return rows
     .map((row) => ({
       time: new Date(String(row.open_time)).getTime(),
@@ -29,9 +25,7 @@ function parseCandles(rows: Record<string, unknown>[]): Candle[] {
     .reverse();
 }
 
-function ema(values: number[], period: number): number | null {
-  if (values.length < period) return null;
-
+function ema(values: number[], period: number): number {
   let result =
     values.slice(0, period).reduce((sum, value) => sum + value, 0) /
     period;
@@ -47,9 +41,7 @@ function ema(values: number[], period: number): number | null {
   return result;
 }
 
-function atr(candles: Candle[], period: number): number | null {
-  if (candles.length <= period) return null;
-
+function atr(candles: Candle[], period = 14): number {
   const ranges: number[] = [];
 
   for (let index = 1; index < candles.length; index++) {
@@ -67,26 +59,20 @@ function atr(candles: Candle[], period: number): number | null {
 
   const recent = ranges.slice(-period);
 
-  return (
-    recent.reduce((sum, value) => sum + value, 0) /
-    recent.length
-  );
+  return recent.reduce((sum, value) => sum + value, 0) / recent.length;
 }
 
-function roundPrice(value: number) {
+function round(value: number) {
   return Math.round(value * 100) / 100;
 }
 
-function wait(
-  reason: string,
-  details: Record<string, unknown> = {}
-) {
+function wait(reason: string, details: Row = {}) {
   return NextResponse.json({
     status: "WAIT",
     reason,
     details,
+    execution: "MANUAL_ONLY",
     generatedAt: new Date().toISOString(),
-    warning: "Aucun signal ne garantit un gain.",
   });
 }
 
@@ -97,26 +83,20 @@ export async function GET() {
         pool.query(
           `SELECT open_time, open, high, low, close
            FROM market_candles
-           WHERE symbol = 'XAUUSD'
-             AND timeframe = 'H1'
-           ORDER BY open_time DESC
-           LIMIT 260`
+           WHERE symbol = 'XAUUSD' AND timeframe = 'H1'
+           ORDER BY open_time DESC LIMIT 220`
         ),
         pool.query(
           `SELECT open_time, open, high, low, close
            FROM market_candles
-           WHERE symbol = 'XAUUSD'
-             AND timeframe = 'M15'
-           ORDER BY open_time DESC
-           LIMIT 120`
+           WHERE symbol = 'XAUUSD' AND timeframe = 'M15'
+           ORDER BY open_time DESC LIMIT 80`
         ),
         pool.query(
           `SELECT open_time, open, high, low, close
            FROM market_candles
-           WHERE symbol = 'XAUUSD'
-             AND timeframe = 'M5'
-           ORDER BY open_time DESC
-           LIMIT 180`
+           WHERE symbol = 'XAUUSD' AND timeframe = 'M5'
+           ORDER BY open_time DESC LIMIT 100`
         ),
         pool.query(
           `SELECT bid, ask, received_at
@@ -126,149 +106,78 @@ export async function GET() {
         ),
       ]);
 
-    const h1 = parseCandles(h1Result.rows);
-    const m15 = parseCandles(m15Result.rows);
-    const m5 = parseCandles(m5Result.rows);
-    const priceRow = priceResult.rows[0];
+    const h1 = toCandles(h1Result.rows).slice(0, -1);
+    const m15 = toCandles(m15Result.rows).slice(0, -1);
+    const m5 = toCandles(m5Result.rows).slice(0, -1);
+    const price = priceResult.rows[0];
 
-    if (
-      h1.length < 205 ||
-      m15.length < 50 ||
-      m5.length < 50 ||
-      !priceRow
-    ) {
-      return wait("Historique MT5 insuffisant.", {
-        h1: h1.length,
-        m15: m15.length,
-        m5: m5.length,
-      });
+    if (h1.length < 200 || m15.length < 30 || m5.length < 30 || !price) {
+      return wait("Historique MT5 insuffisant.");
     }
 
-    const bid = Number(priceRow.bid);
-    const ask = Number(priceRow.ask);
-    const priceTime = new Date(priceRow.received_at);
+    const bid = Number(price.bid);
+    const ask = Number(price.ask);
     const priceAge =
-      (Date.now() - priceTime.getTime()) / 1000;
+      Date.now() - new Date(price.received_at).getTime();
 
-    if (
-      !Number.isFinite(bid) ||
-      !Number.isFinite(ask) ||
-      bid <= 0 ||
-      ask <= 0 ||
-      priceAge > 120
-    ) {
-      return wait("Le flux FTMO-MT5 est arrêté ou en retard.", {
-        priceAgeSeconds: Math.round(priceAge),
-      });
+    if (!bid || !ask || priceAge > 120000) {
+      return wait("Flux FTMO-MT5 absent ou en retard.");
     }
 
-    // La dernière bougie est encore en formation.
-    const h1Closed = h1.slice(0, -1);
-    const m15Closed = m15.slice(0, -1);
-    const m5Closed = m5.slice(0, -1);
+    const closes = h1.map((candle) => candle.close);
+    const ema50 = ema(closes, 50);
+    const ema200 = ema(closes, 200);
+    const lastH1 = h1[h1.length - 1];
 
-    const h1Closes = h1Closed.map(
-      (candle) => candle.close
-    );
-
-    const ema50 = ema(h1Closes, 50);
-    const ema200 = ema(h1Closes, 200);
-    const previousEma50 = ema(
-      h1Closes.slice(0, -1),
-      50
-    );
-
-    if (
-      ema50 === null ||
-      ema200 === null ||
-      previousEma50 === null
-    ) {
-      return wait("Calcul de la tendance H1 impossible.");
-    }
-
-    const lastH1 = h1Closed[h1Closed.length - 1];
-
-    const bullishTrend =
-      lastH1.close > ema50 &&
-      ema50 > ema200 &&
-      ema50 > previousEma50;
-
-    const bearishTrend =
-      lastH1.close < ema50 &&
-      ema50 < ema200 &&
-      ema50 < previousEma50;
-
-    const trend = bullishTrend
-      ? "BULLISH"
-      : bearishTrend
-        ? "BEARISH"
-        : "NEUTRAL";
+    const trend =
+      lastH1.close > ema50 && ema50 > ema200
+        ? "BULLISH"
+        : lastH1.close < ema50 && ema50 < ema200
+          ? "BEARISH"
+          : "NEUTRAL";
 
     if (trend === "NEUTRAL") {
-      return wait("Tendance H1 insuffisamment claire.", {
-        close: roundPrice(lastH1.close),
-        ema50: roundPrice(ema50),
-        ema200: roundPrice(ema200),
+      return wait("Tendance H1 neutre.", {
+        close: round(lastH1.close),
+        ema50: round(ema50),
+        ema200: round(ema200),
       });
     }
 
-    const latestCandle = m5[m5.length - 1];
-    const latestTime = new Date(latestCandle.time);
-    const serverMinutes =
-      latestTime.getUTCHours() * 60 +
-      latestTime.getUTCMinutes();
+    const latestTime = new Date(m5[m5.length - 1].time);
+    const minutes =
+      latestTime.getUTCHours() * 60 + latestTime.getUTCMinutes();
 
-    const london =
-      serverMinutes >= 8 * 60 &&
-      serverMinutes <= 13 * 60;
-
-    const newYork =
-      serverMinutes >= 14 * 60 + 30 &&
-      serverMinutes <= 19 * 60 + 30;
+    const london = minutes >= 9 * 60 && minutes <= 13 * 60;
+    const newYork = minutes >= 14 * 60 + 30 && minutes <= 19 * 60 + 30;
 
     if (!london && !newYork) {
-      return wait("Hors des sessions Londres et New York.", {
+      return wait("Hors session Londres ou New York.", {
         trend,
         serverTime: latestTime.toISOString(),
       });
     }
 
-    let sweep: Sweep | null = null;
+    let sweep:
+      | {
+          direction: "BUY" | "SELL";
+          candle: Candle;
+          level: number;
+        }
+      | undefined;
 
-    const startIndex = Math.max(
-      20,
-      m15Closed.length - 5
-    );
-
-    for (
-      let index = startIndex;
-      index < m15Closed.length;
-      index++
-    ) {
-      const candle = m15Closed[index];
-      const previous = m15Closed.slice(
-        index - 20,
-        index
-      );
-
-      const previousLow = Math.min(
-        ...previous.map((item) => item.low)
-      );
-
-      const previousHigh = Math.max(
-        ...previous.map((item) => item.high)
-      );
+    for (let index = Math.max(20, m15.length - 5); index < m15.length; index++) {
+      const candle = m15[index];
+      const previous = m15.slice(index - 20, index);
+      const previousLow = Math.min(...previous.map((item) => item.low));
+      const previousHigh = Math.max(...previous.map((item) => item.high));
 
       if (
         trend === "BULLISH" &&
         candle.low < previousLow &&
         candle.close > previousLow
       ) {
-        sweep = {
-          direction: "BUY",
-          candle,
-          level: previousLow,
-        };
+        sweep = { direction: "BUY", candle, level: previousLow };
       }
 
       if (
@@ -276,11 +185,7 @@ export async function GET() {
         candle.high > previousHigh &&
         candle.close < previousHigh
       ) {
-        sweep = {
-          direction: "SELL",
-          candle,
-          level: previousHigh,
-        };
+        sweep = { direction: "SELL", candle, level: previousHigh };
       }
     }
 
@@ -291,143 +196,83 @@ export async function GET() {
       });
     }
 
-    const confirmedSweep = sweep;
-    const atrM5 = atr(m5Closed, 14);
-    const atrM15 = atr(m15Closed, 14);
-
-    if (atrM5 === null || atrM15 === null) {
-      return wait("Calcul de la volatilité impossible.");
-    }
-
-    const afterSweep = m5Closed.filter(
-      (candle) =>
-        candle.time >= confirmedSweep.candle.time
+    const volatilityM5 = atr(m5);
+    const volatilityM15 = atr(m15);
+    const afterSweep = m5.filter(
+      (candle) => candle.time >= sweep.candle.time
     );
 
-    let confirmation: Candle | null = null;
-    let confirmationType = "";
+    let confirmation: Candle | undefined;
 
-    for (
-      let index = 2;
-      index < afterSweep.length;
-      index++
-    ) {
+    for (let index = 2; index < afterSweep.length; index++) {
       const first = afterSweep[index - 2];
       const current = afterSweep[index];
+      const body = Math.abs(current.close - current.open);
+      const displacement = body >= volatilityM5 * 0.8;
 
-      const body = Math.abs(
-        current.close - current.open
-      );
-
-      const displacement = body >= atrM5 * 0.8;
-
-      const bullishFvg =
-        confirmedSweep.direction === "BUY" &&
+      const buyConfirmation =
+        sweep.direction === "BUY" &&
         current.low > first.high &&
-        current.close > confirmedSweep.candle.high &&
+        current.close > sweep.candle.high &&
         displacement;
 
-      const bearishFvg =
-        confirmedSweep.direction === "SELL" &&
+      const sellConfirmation =
+        sweep.direction === "SELL" &&
         current.high < first.low &&
-        current.close < confirmedSweep.candle.low &&
+        current.close < sweep.candle.low &&
         displacement;
 
-      if (bullishFvg || bearishFvg) {
+      if (buyConfirmation || sellConfirmation) {
         confirmation = current;
-        confirmationType = bullishFvg
-          ? "BULLISH_FVG_M5"
-          : "BEARISH_FVG_M5";
       }
     }
 
     if (!confirmation) {
-      return wait(
-        "Sweep présent, mais confirmation M5 absente.",
-        {
-          trend,
-          direction: confirmedSweep.direction,
-          sweepLevel: roundPrice(
-            confirmedSweep.level
-          ),
-          sweepTime: new Date(
-            confirmedSweep.candle.time
-          ).toISOString(),
-        }
-      );
-    }
-
-    const entry =
-      confirmedSweep.direction === "BUY"
-        ? ask
-        : bid;
-
-    const stopLoss =
-      confirmedSweep.direction === "BUY"
-        ? confirmedSweep.candle.low -
-          atrM15 * 0.15
-        : confirmedSweep.candle.high +
-          atrM15 * 0.15;
-
-    const riskDistance = Math.abs(
-      entry - stopLoss
-    );
-
-    if (
-      riskDistance <= 0 ||
-      riskDistance > atrM15 * 2.5
-    ) {
-      return wait("Entrée trop éloignée du sweep.", {
-        entry: roundPrice(entry),
-        stopLoss: roundPrice(stopLoss),
-        atrM15: roundPrice(atrM15),
+      return wait("Sweep détecté, confirmation FVG M5 absente.", {
+        trend,
+        direction: sweep.direction,
+        sweepLevel: round(sweep.level),
       });
     }
 
+    const entry = sweep.direction === "BUY" ? ask : bid;
+    const stopLoss =
+      sweep.direction === "BUY"
+        ? sweep.candle.low - volatilityM15 * 0.15
+        : sweep.candle.high + volatilityM15 * 0.15;
+
+    const risk = Math.abs(entry - stopLoss);
+
+    if (risk <= 0 || risk > volatilityM15 * 2.5) {
+      return wait("Entrée trop éloignée du sweep.");
+    }
+
     const takeProfit =
-      confirmedSweep.direction === "BUY"
-        ? entry + riskDistance * 2.5
-        : entry - riskDistance * 2.5;
+      sweep.direction === "BUY"
+        ? entry + risk * 2.5
+        : entry - risk * 2.5;
 
     return NextResponse.json({
       status: "SETUP_VALID",
       symbol: "XAUUSD",
-      direction: confirmedSweep.direction,
-      entry: roundPrice(entry),
-      stopLoss: roundPrice(stopLoss),
-      takeProfit: roundPrice(takeProfit),
+      direction: sweep.direction,
+      entry: round(entry),
+      stopLoss: round(stopLoss),
+      takeProfit: round(takeProfit),
       riskReward: 2.5,
       suggestedRiskPercent: 0.25,
-      trend: {
-        timeframe: "H1",
-        direction: trend,
-        close: roundPrice(lastH1.close),
-        ema50: roundPrice(ema50),
-        ema200: roundPrice(ema200),
-      },
-      liquiditySweep: {
-        timeframe: "M15",
-        level: roundPrice(confirmedSweep.level),
-        candleTime: new Date(
-          confirmedSweep.candle.time
-        ).toISOString(),
-      },
-      confirmation: {
-        timeframe: "M5",
-        type: confirmationType,
-        candleTime: new Date(
-          confirmation.time
-        ).toISOString(),
-      },
+      trend,
       session: london ? "LONDON" : "NEW_YORK",
+      sweepLevel: round(sweep.level),
+      sweepTime: new Date(sweep.candle.time).toISOString(),
+      confirmationTime: new Date(confirmation.time).toISOString(),
       priceSource: "FTMO-MT5",
       execution: "MANUAL_ONLY",
+      warning: "Moteur expérimental à tester uniquement en démo.",
       generatedAt: new Date().toISOString(),
-      warning:
-        "Moteur expérimental. Vérification manuelle et test en démo obligatoires.",
     });
   } catch (error) {
-    console.error("Erreur moteur de setup:", error);
+    console.error("Erreur setup:", error);
 
     return NextResponse.json(
       {
@@ -439,5 +284,4 @@ export async function GET() {
   }
 }
 
-    if (!londonSession && !newYorkSession) {
-      return wait
+// FIN DU FICHIER

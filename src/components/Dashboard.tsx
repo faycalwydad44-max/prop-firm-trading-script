@@ -147,7 +147,6 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 animate-slide-up">
-  <RealSetupPanel />
       <RealSetupPanel />
       {/* Header with auto-refresh controls */}
       <div className="flex items-center justify-between flex-wrap gap-4">

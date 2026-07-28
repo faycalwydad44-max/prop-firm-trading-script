@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --color-dark-900: #0a0e17;
+  --color-dark-800: #0f1524;
+  --color-dark-700: #151d30;
+  --color-dark-600: #1b2540;
+  --color-dark-500: #243050;
+  --color-gold-400: #f0b90b;
+  --color-gold-500: #d4a40a;
+  --color-gold-600: #b88f09;
+  --color-profit: #00e676;
+  --color-loss: #ff1744;
+  --color-buy: #26a69a;
+  --color-sell: #ef5350;
+  --color-signal: #42a5f5;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #243050 #0f1524;
+}
+
+body {
+  background-color: #0a0e17;
+  color: #e2e8f0;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 5px rgba(240, 185, 11, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(240, 185, 11, 0.6); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.5s ease-out;
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s infinite;
+}

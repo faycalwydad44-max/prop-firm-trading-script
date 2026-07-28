@@ -217,7 +217,6 @@ export default function Dashboard() {
           />
         </div>
       )}
-      <RealSetupPanel />
       {/* Warnings */}
       {data.propFirmStatus.warnings.length > 0 && (
         <div className="bg-red-900/20 border border-red-500/30 rounded-xl p-4 animate-pulse">

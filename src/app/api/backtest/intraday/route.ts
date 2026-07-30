@@ -5,6 +5,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 type Direction = "BUY" | "SELL";
+type Bias = "BULLISH" | "BEARISH" | "NEUTRAL";
+
 type ModuleName =
   | "LONDON_SWEEP"
   | "NEW_YORK_CONTINUATION";
@@ -29,6 +31,7 @@ type Signal = {
 const M5_MS = 5 * 60 * 1000;
 const M15_MS = 15 * 60 * 1000;
 const H1_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 
 const SPREAD = 0.45;
 const SLIPPAGE = 0.05;
@@ -36,6 +39,20 @@ const RISK_PERCENT = 0.1;
 const TARGET_R = 2;
 const MAX_TRADES_PER_DAY = 2;
 const MAX_HOLDING_BARS = 72;
+
+// Heures du serveur FTMO, pas les heures UTC de TradingView.
+const ASIA_START_MINUTE = 2 * 60;
+const ASIA_END_MINUTE = 10 * 60;
+
+const LONDON_START_MINUTE = 10 * 60;
+const LONDON_END_MINUTE = 14 * 60;
+
+const PRE_NEW_YORK_START_MINUTE = 10 * 60;
+const NEW_YORK_START_MINUTE = 15 * 60 + 30;
+const NEW_YORK_END_MINUTE = 20 * 60 + 30;
+
+// Toutes les positions sont fermees avant la nuit du serveur FTMO.
+const FORCED_DAILY_EXIT_MINUTE = 23 * 60;
 
 function toCandles(
   rows: Record<string, unknown>[]
@@ -56,19 +73,25 @@ function emaSeries(
   const output: Array<number | null> =
     new Array(values.length).fill(null);
 
-  if (values.length < period) return output;
+  if (values.length < period) {
+    return output;
+  }
 
   let value =
-    values.slice(0, period).reduce(
-      (sum, item) => sum + item,
-      0
-    ) / period;
+    values
+      .slice(0, period)
+      .reduce((sum, item) => sum + item, 0) /
+    period;
 
   output[period - 1] = value;
 
   const multiplier = 2 / (period + 1);
 
-  for (let index = period; index < values.length; index++) {
+  for (
+    let index = period;
+    index < values.length;
+    index++
+  ) {
     value =
       values[index] * multiplier +
       value * (1 - multiplier);
@@ -86,13 +109,18 @@ function atrSeries(
   const output: Array<number | null> =
     new Array(candles.length).fill(null);
 
-  const ranges: number[] = new Array(
+  const ranges = new Array<number>(
     candles.length
   ).fill(0);
 
-  for (let index = 1; index < candles.length; index++) {
+  for (
+    let index = 1;
+    index < candles.length;
+    index++
+  ) {
     const candle = candles[index];
-    const previousClose = candles[index - 1].close;
+    const previousClose =
+      candles[index - 1].close;
 
     ranges[index] = Math.max(
       candle.high - candle.low,
@@ -108,7 +136,7 @@ function atrSeries(
 
       output[index] =
         recent.reduce(
-          (sum, value) => sum + value,
+          (sum, item) => sum + item,
           0
         ) / recent.length;
     }
@@ -124,14 +152,14 @@ function adxSeries(
   const output: Array<number | null> =
     new Array(candles.length).fill(null);
 
-  const trueRanges: number[] =
-    new Array(candles.length).fill(0);
+  const trueRanges =
+    new Array<number>(candles.length).fill(0);
 
-  const plusDm: number[] =
-    new Array(candles.length).fill(0);
+  const plusDm =
+    new Array<number>(candles.length).fill(0);
 
-  const minusDm: number[] =
-    new Array(candles.length).fill(0);
+  const minusDm =
+    new Array<number>(candles.length).fill(0);
 
   const dx: Array<number | null> =
     new Array(candles.length).fill(null);
@@ -141,12 +169,19 @@ function adxSeries(
   let smoothMinus = 0;
   let currentAdx = 0;
 
-  for (let index = 1; index < candles.length; index++) {
+  for (
+    let index = 1;
+    index < candles.length;
+    index++
+  ) {
     const current = candles[index];
     const previous = candles[index - 1];
 
-    const upMove = current.high - previous.high;
-    const downMove = previous.low - current.low;
+    const upMove =
+      current.high - previous.high;
+
+    const downMove =
+      previous.low - current.low;
 
     plusDm[index] =
       upMove > downMove && upMove > 0
@@ -160,37 +195,56 @@ function adxSeries(
 
     trueRanges[index] = Math.max(
       current.high - current.low,
-      Math.abs(current.high - previous.close),
-      Math.abs(current.low - previous.close)
+      Math.abs(
+        current.high - previous.close
+      ),
+      Math.abs(
+        current.low - previous.close
+      )
     );
 
     if (index === period) {
       smoothTr = trueRanges
         .slice(1, period + 1)
-        .reduce((sum, value) => sum + value, 0);
+        .reduce(
+          (sum, item) => sum + item,
+          0
+        );
 
       smoothPlus = plusDm
         .slice(1, period + 1)
-        .reduce((sum, value) => sum + value, 0);
+        .reduce(
+          (sum, item) => sum + item,
+          0
+        );
 
       smoothMinus = minusDm
         .slice(1, period + 1)
-        .reduce((sum, value) => sum + value, 0);
+        .reduce(
+          (sum, item) => sum + item,
+          0
+        );
     } else if (index > period) {
       smoothTr =
-        smoothTr - smoothTr / period +
+        smoothTr -
+        smoothTr / period +
         trueRanges[index];
 
       smoothPlus =
-        smoothPlus - smoothPlus / period +
+        smoothPlus -
+        smoothPlus / period +
         plusDm[index];
 
       smoothMinus =
-        smoothMinus - smoothMinus / period +
+        smoothMinus -
+        smoothMinus / period +
         minusDm[index];
     }
 
-    if (index >= period && smoothTr > 0) {
+    if (
+      index >= period &&
+      smoothTr > 0
+    ) {
       const plusDi =
         (100 * smoothPlus) / smoothTr;
 
@@ -201,26 +255,29 @@ function adxSeries(
 
       dx[index] =
         total > 0
-          ? (100 * Math.abs(plusDi - minusDi)) /
+          ? (100 *
+              Math.abs(plusDi - minusDi)) /
             total
           : 0;
     }
 
     if (index === period * 2 - 1) {
-      const values = dx
+      const initialDx = dx
         .slice(period, period * 2)
         .filter(
           (value): value is number =>
             value !== null
         );
 
-      currentAdx =
-        values.reduce(
-          (sum, value) => sum + value,
-          0
-        ) / values.length;
+      if (initialDx.length > 0) {
+        currentAdx =
+          initialDx.reduce(
+            (sum, item) => sum + item,
+            0
+          ) / initialDx.length;
 
-      output[index] = currentAdx;
+        output[index] = currentAdx;
+      }
     } else if (
       index >= period * 2 &&
       dx[index] !== null
@@ -257,38 +314,51 @@ function choppinessSeries(
     let trueRangeSum = 0;
 
     for (
-      let windowIndex = 0;
-      windowIndex < window.length;
-      windowIndex++
+      let itemIndex = 0;
+      itemIndex < window.length;
+      itemIndex++
     ) {
-      const candle = window[windowIndex];
+      const candle = window[itemIndex];
 
       const previousClose =
-        windowIndex === 0
+        itemIndex === 0
           ? candle.open
-          : window[windowIndex - 1].close;
+          : window[itemIndex - 1].close;
 
       trueRangeSum += Math.max(
         candle.high - candle.low,
-        Math.abs(candle.high - previousClose),
-        Math.abs(candle.low - previousClose)
+        Math.abs(
+          candle.high - previousClose
+        ),
+        Math.abs(
+          candle.low - previousClose
+        )
       );
     }
 
     const highest = Math.max(
-      ...window.map((candle) => candle.high)
+      ...window.map(
+        (candle) => candle.high
+      )
     );
 
     const lowest = Math.min(
-      ...window.map((candle) => candle.low)
+      ...window.map(
+        (candle) => candle.low
+      )
     );
 
     const range = highest - lowest;
 
-    if (range > 0 && trueRangeSum > 0) {
+    if (
+      range > 0 &&
+      trueRangeSum > 0
+    ) {
       output[index] =
         (100 *
-          Math.log10(trueRangeSum / range)) /
+          Math.log10(
+            trueRangeSum / range
+          )) /
         Math.log10(period);
     }
   }
@@ -336,7 +406,9 @@ function firstIndexAtOrAfter(
       (low + high) / 2
     );
 
-    if (candles[middle].time < timestamp) {
+    if (
+      candles[middle].time < timestamp
+    ) {
       low = middle + 1;
     } else {
       high = middle;
@@ -344,15 +416,6 @@ function firstIndexAtOrAfter(
   }
 
   return low;
-}
-
-function minuteOfDay(timestamp: number) {
-  const date = new Date(timestamp);
-
-  return (
-    date.getUTCHours() * 60 +
-    date.getUTCMinutes()
-  );
 }
 
 function dayStart(timestamp: number) {
@@ -370,7 +433,7 @@ function biasAt(
   h1: Candle[],
   ema20: Array<number | null>,
   ema50: Array<number | null>
-) {
+): Bias {
   const index = lastClosedIndex(
     h1,
     H1_MS,
@@ -442,8 +505,13 @@ function createLondonSignals(
   const signals: Signal[] = [];
 
   for (const day of days) {
-    const asianStart = day;
-    const asianEnd = day + 8 * H1_MS;
+    const asianStart =
+      day +
+      ASIA_START_MINUTE * MINUTE_MS;
+
+    const asianEnd =
+      day +
+      ASIA_END_MINUTE * MINUTE_MS;
 
     const asia = m15.filter(
       (candle) =>
@@ -451,36 +519,48 @@ function createLondonSignals(
         candle.time < asianEnd
     );
 
-    if (asia.length < 16) continue;
+    if (asia.length < 16) {
+      continue;
+    }
 
     const asianHigh = Math.max(
-      ...asia.map((candle) => candle.high)
+      ...asia.map(
+        (candle) => candle.high
+      )
     );
 
     const asianLow = Math.min(
-      ...asia.map((candle) => candle.low)
+      ...asia.map(
+        (candle) => candle.low
+      )
     );
 
     const londonStart =
       firstIndexAtOrAfter(
         m5,
-        day + 8 * H1_MS
+        day +
+          LONDON_START_MINUTE *
+            MINUTE_MS
       );
 
     const londonEnd =
       firstIndexAtOrAfter(
         m5,
-        day + 12 * H1_MS
+        day +
+          LONDON_END_MINUTE *
+            MINUTE_MS
       );
 
     let created = false;
 
     for (
       let sweepIndex = londonStart;
-      sweepIndex < londonEnd && !created;
+      sweepIndex < londonEnd &&
+      !created;
       sweepIndex++
     ) {
       const sweep = m5[sweepIndex];
+
       const sweepClose =
         sweep.time + M5_MS;
 
@@ -501,15 +581,21 @@ function createLondonSignals(
         sweep.high > asianHigh &&
         sweep.close < asianHigh;
 
-      if (!buySweep && !sellSweep) continue;
+      if (
+        !buySweep &&
+        !sellSweep
+      ) {
+        continue;
+      }
 
       const direction: Direction =
         buySweep ? "BUY" : "SELL";
 
-      const confirmationEnd = Math.min(
-        londonEnd,
-        sweepIndex + 7
-      );
+      const confirmationEnd =
+        Math.min(
+          londonEnd,
+          sweepIndex + 7
+        );
 
       for (
         let index = sweepIndex + 1;
@@ -517,22 +603,31 @@ function createLondonSignals(
         index++
       ) {
         const current = m5[index];
-        const volatility5 = atr5[index];
+        const volatility5 =
+          atr5[index];
 
-        if (volatility5 === null) continue;
+        if (
+          volatility5 === null
+        ) {
+          continue;
+        }
 
         const body = Math.abs(
-          current.close - current.open
+          current.close -
+            current.open
         );
 
         const confirmation =
           direction === "BUY"
-            ? current.close > sweep.high
-            : current.close < sweep.low;
+            ? current.close >
+              sweep.high
+            : current.close <
+              sweep.low;
 
         if (
           !confirmation ||
-          body < volatility5 * 0.4
+          body <
+            volatility5 * 0.4
         ) {
           continue;
         }
@@ -540,11 +635,12 @@ function createLondonSignals(
         const entryTime =
           current.time + M5_MS;
 
-        const m15Index = lastClosedIndex(
-          m15,
-          M15_MS,
-          entryTime
-        );
+        const m15Index =
+          lastClosedIndex(
+            m15,
+            M15_MS,
+            entryTime
+          );
 
         if (
           m15Index < 0 ||
@@ -553,7 +649,8 @@ function createLondonSignals(
             adx15,
             chop15
           ) ||
-          atr15[m15Index] === null
+          atr15[m15Index] ===
+            null
         ) {
           continue;
         }
@@ -566,7 +663,8 @@ function createLondonSignals(
             ? current.close +
               SPREAD +
               SLIPPAGE
-            : current.close - SLIPPAGE;
+            : current.close -
+              SLIPPAGE;
 
         const stopLoss =
           direction === "BUY"
@@ -582,7 +680,8 @@ function createLondonSignals(
 
         if (
           risk <= SPREAD ||
-          risk > volatility15 * 2.5
+          risk >
+            volatility15 * 2.5
         ) {
           continue;
         }
@@ -595,8 +694,10 @@ function createLondonSignals(
           stopLoss,
           takeProfit:
             direction === "BUY"
-              ? entry + risk * TARGET_R
-              : entry - risk * TARGET_R,
+              ? entry +
+                risk * TARGET_R
+              : entry -
+                risk * TARGET_R,
         });
 
         created = true;
@@ -623,19 +724,32 @@ function createNewYorkSignals(
   const signals: Signal[] = [];
 
   for (const day of days) {
-    const rangeStart = day + 9 * H1_MS;
-    const rangeEnd =
+    const rangeStart =
       day +
-      14 * H1_MS +
-      30 * 60 * 1000;
+      PRE_NEW_YORK_START_MINUTE *
+        MINUTE_MS;
+
+    const newYorkStart =
+      day +
+      NEW_YORK_START_MINUTE *
+        MINUTE_MS;
+
+    const newYorkEnd =
+      day +
+      NEW_YORK_END_MINUTE *
+        MINUTE_MS;
 
     const preNewYork = m15.filter(
       (candle) =>
         candle.time >= rangeStart &&
-        candle.time < rangeEnd
+        candle.time < newYorkStart
     );
 
-    if (preNewYork.length < 12) continue;
+    if (
+      preNewYork.length < 12
+    ) {
+      continue;
+    }
 
     const rangeHigh = Math.max(
       ...preNewYork.map(
@@ -650,23 +764,30 @@ function createNewYorkSignals(
     );
 
     const breakoutStart =
-      firstIndexAtOrAfter(m15, rangeEnd);
+      firstIndexAtOrAfter(
+        m15,
+        newYorkStart
+      );
 
     const breakoutEnd =
       firstIndexAtOrAfter(
         m15,
-        day + 17 * H1_MS
+        newYorkEnd
       );
 
     let created = false;
 
     for (
-      let breakoutIndex = breakoutStart;
-      breakoutIndex < breakoutEnd &&
+      let breakoutIndex =
+        breakoutStart;
+      breakoutIndex <
+        breakoutEnd &&
       !created;
       breakoutIndex++
     ) {
-      const breakout = m15[breakoutIndex];
+      const breakout =
+        m15[breakoutIndex];
+
       const breakoutClose =
         breakout.time + M15_MS;
 
@@ -693,62 +814,86 @@ function createNewYorkSignals(
       }
 
       const body = Math.abs(
-        breakout.close - breakout.open
+        breakout.close -
+          breakout.open
       );
 
       const buyBreakout =
         bias === "BULLISH" &&
         breakout.close > rangeHigh &&
-        body >= volatility15 * 0.6;
+        body >=
+          volatility15 * 0.6;
 
       const sellBreakout =
         bias === "BEARISH" &&
         breakout.close < rangeLow &&
-        body >= volatility15 * 0.6;
+        body >=
+          volatility15 * 0.6;
 
-      if (!buyBreakout && !sellBreakout) {
+      if (
+        !buyBreakout &&
+        !sellBreakout
+      ) {
         continue;
       }
 
       const direction: Direction =
-        buyBreakout ? "BUY" : "SELL";
+        buyBreakout
+          ? "BUY"
+          : "SELL";
 
       const level =
         direction === "BUY"
           ? rangeHigh
           : rangeLow;
 
-      const pullbackEnd = Math.min(
-        m15.length,
-        breakoutIndex + 5
-      );
+      const pullbackEnd =
+        Math.min(
+          breakoutEnd,
+          breakoutIndex + 5
+        );
 
       for (
         let pullbackIndex =
           breakoutIndex + 1;
-        pullbackIndex < pullbackEnd;
+        pullbackIndex <
+          pullbackEnd;
         pullbackIndex++
       ) {
         const pullback =
           m15[pullbackIndex];
 
+        if (
+          pullback.time >=
+          newYorkEnd
+        ) {
+          break;
+        }
+
         const buyPullback =
           direction === "BUY" &&
           pullback.low <=
-            level + volatility15 * 0.2 &&
+            level +
+              volatility15 * 0.2 &&
           pullback.low >=
-            level - volatility15 * 0.5 &&
+            level -
+              volatility15 * 0.5 &&
           pullback.close > level;
 
         const sellPullback =
           direction === "SELL" &&
           pullback.high >=
-            level - volatility15 * 0.2 &&
+            level -
+              volatility15 * 0.2 &&
           pullback.high <=
-            level + volatility15 * 0.5 &&
+            level +
+              volatility15 * 0.5 &&
           pullback.close < level;
 
-        if (!buyPullback && !sellPullback) {
+        if (
+          !buyPullback &&
+          !sellPullback
+        ) {
           continue;
         }
 
@@ -761,24 +906,41 @@ function createNewYorkSignals(
             pullbackClose
           );
 
-        const m5End = Math.min(
-          m5.length,
-          m5Start + 7
-        );
+        const m5End =
+          Math.min(
+            m5.length,
+            m5Start + 7
+          );
 
         for (
           let index = m5Start;
           index < m5End;
           index++
         ) {
-          const current = m5[index];
-          const volatility5 = atr5[index];
+          const current =
+            m5[index];
 
-          if (volatility5 === null) continue;
+          if (
+            current.time >=
+            newYorkEnd
+          ) {
+            break;
+          }
 
-          const bodyM5 = Math.abs(
-            current.close - current.open
-          );
+          const volatility5 =
+            atr5[index];
+
+          if (
+            volatility5 === null
+          ) {
+            continue;
+          }
+
+          const bodyM5 =
+            Math.abs(
+              current.close -
+                current.open
+            );
 
           const confirmation =
             direction === "BUY"
@@ -789,7 +951,8 @@ function createNewYorkSignals(
 
           if (
             !confirmation ||
-            bodyM5 < volatility5 * 0.4
+            bodyM5 <
+              volatility5 * 0.4
           ) {
             continue;
           }
@@ -798,8 +961,8 @@ function createNewYorkSignals(
             current.time + M5_MS;
 
           if (
-            minuteOfDay(entryTime) >
-            18 * 60 + 30
+            entryTime >
+            newYorkEnd
           ) {
             break;
           }
@@ -837,7 +1000,8 @@ function createNewYorkSignals(
 
           if (
             risk <= SPREAD ||
-            risk > volatility15 * 2.5
+            risk >
+              volatility15 * 2.5
           ) {
             continue;
           }
@@ -861,7 +1025,9 @@ function createNewYorkSignals(
           break;
         }
 
-        if (created) break;
+        if (created) {
+          break;
+        }
       }
     }
   }
@@ -885,9 +1051,13 @@ function simulate(
 
   let wins = 0;
   let losses = 0;
+  let breakeven = 0;
   let totalR = 0;
   let grossProfit = 0;
   let grossLoss = 0;
+
+  let skippedOverlap = 0;
+  let skippedDailyLimit = 0;
 
   const dailyTrades =
     new Map<string, number>();
@@ -898,22 +1068,29 @@ function simulate(
   >[] = [];
 
   for (const signal of ordered) {
-    if (signal.entryTime <= lastExitTime) {
+    if (
+      signal.entryTime <=
+      lastExitTime
+    ) {
+      skippedOverlap++;
       continue;
     }
 
-    const day = new Date(
+    const dayKey = new Date(
       signal.entryTime
     )
       .toISOString()
       .slice(0, 10);
 
     const dailyCount =
-      dailyTrades.get(day) || 0;
+      dailyTrades.get(dayKey) ||
+      0;
 
     if (
-      dailyCount >= MAX_TRADES_PER_DAY
+      dailyCount >=
+      MAX_TRADES_PER_DAY
     ) {
+      skippedDailyLimit++;
       continue;
     }
 
@@ -923,21 +1100,63 @@ function simulate(
         signal.entryTime
       );
 
-    if (start >= m5.length) continue;
+    if (
+      start >= m5.length
+    ) {
+      continue;
+    }
 
-    const riskDistance = Math.abs(
-      signal.entry - signal.stopLoss
-    );
+    const riskDistance =
+      Math.abs(
+        signal.entry -
+          signal.stopLoss
+      );
 
-    const finalIndex = Math.min(
-      m5.length - 1,
-      start + MAX_HOLDING_BARS
-    );
+    const maximumTime =
+      signal.entryTime +
+      MAX_HOLDING_BARS *
+        M5_MS;
+
+    const forcedExitTime =
+      dayStart(
+        signal.entryTime
+      ) +
+      FORCED_DAILY_EXIT_MINUTE *
+        MINUTE_MS;
+
+    const allowedExitTime =
+      Math.min(
+        maximumTime,
+        forcedExitTime
+      );
+
+    const timeExitIndex =
+      firstIndexAtOrAfter(
+        m5,
+        allowedExitTime
+      ) - 1;
+
+    const finalIndex =
+      Math.min(
+        m5.length - 1,
+        start +
+          MAX_HOLDING_BARS -
+          1,
+        timeExitIndex
+      );
+
+    if (
+      finalIndex < start
+    ) {
+      continue;
+    }
 
     let resultR = 0;
     let outcome = "TIME";
+
     let exitTime =
-      m5[finalIndex].time + M5_MS;
+      m5[finalIndex].time +
+      M5_MS;
 
     for (
       let index = start;
@@ -950,16 +1169,21 @@ function simulate(
         signal.direction === "BUY"
           ? candle.low <=
             signal.stopLoss
-          : candle.high + SPREAD >=
+          : candle.high +
+              SPREAD >=
             signal.stopLoss;
 
       const targetHit =
         signal.direction === "BUY"
           ? candle.high >=
             signal.takeProfit
-          : candle.low + SPREAD <=
+          : candle.low +
+              SPREAD <=
             signal.takeProfit;
 
+      // Hypothese conservatrice :
+      // si SL et TP sont touches dans la meme bougie,
+      // le stop est compte en premier.
       if (stopHit) {
         resultR = -1;
         outcome = "SL";
@@ -976,22 +1200,32 @@ function simulate(
         break;
       }
 
-      if (index === finalIndex) {
-        const close =
-          signal.direction === "BUY"
+      if (
+        index === finalIndex
+      ) {
+        const effectiveClose =
+          signal.direction ===
+          "BUY"
             ? candle.close
-            : candle.close + SPREAD;
+            : candle.close +
+              SPREAD;
 
         resultR =
-          signal.direction === "BUY"
-            ? (close - signal.entry) /
+          signal.direction ===
+          "BUY"
+            ? (effectiveClose -
+                signal.entry) /
               riskDistance
-            : (signal.entry - close) /
+            : (signal.entry -
+                effectiveClose) /
               riskDistance;
 
         resultR = Math.max(
           -1,
-          Math.min(TARGET_R, resultR)
+          Math.min(
+            TARGET_R,
+            resultR
+          )
         );
       }
     }
@@ -1004,67 +1238,88 @@ function simulate(
       riskCash * resultR;
 
     equity += pnl;
-    peak = Math.max(peak, equity);
-
-    maximumDrawdown = Math.max(
-      maximumDrawdown,
-      ((peak - equity) / peak) * 100
+    peak = Math.max(
+      peak,
+      equity
     );
+
+    maximumDrawdown =
+      Math.max(
+        maximumDrawdown,
+        ((peak - equity) /
+          peak) *
+          100
+      );
 
     totalR += resultR;
 
-    if (resultR > 0) {
+    if (resultR > 0.01) {
       wins++;
       grossProfit += pnl;
-    } else {
+    } else if (
+      resultR < -0.01
+    ) {
       losses++;
-      grossLoss += Math.abs(pnl);
+      grossLoss +=
+        Math.abs(pnl);
+    } else {
+      breakeven++;
     }
 
     dailyTrades.set(
-      day,
+      dayKey,
       dailyCount + 1
     );
 
-    lastExitTime = exitTime;
+    lastExitTime =
+      exitTime;
 
     trades.push({
       module: signal.module,
-      direction: signal.direction,
-      entryTime: new Date(
-        signal.entryTime
-      ).toISOString(),
-      exitTime: new Date(
-        exitTime
-      ).toISOString(),
+      direction:
+        signal.direction,
+      entryTime:
+        new Date(
+          signal.entryTime
+        ).toISOString(),
+      exitTime:
+        new Date(
+          exitTime
+        ).toISOString(),
       outcome,
-      resultR: Number(
-        resultR.toFixed(2)
-      ),
+      resultR:
+        Number(
+          resultR.toFixed(2)
+        ),
     });
   }
 
-  const totalTrades = trades.length;
+  const totalTrades =
+    trades.length;
 
   const profitFactor =
     grossLoss > 0
-      ? grossProfit / grossLoss
+      ? grossProfit /
+        grossLoss
       : null;
 
   const expectancyR =
     totalTrades > 0
-      ? totalR / totalTrades
+      ? totalR /
+        totalTrades
       : 0;
 
   return {
     totalTrades,
     wins,
     losses,
+    breakeven,
     winRate:
       totalTrades > 0
         ? Number(
             (
-              (wins / totalTrades) *
+              (wins /
+                totalTrades) *
               100
             ).toFixed(2)
           )
@@ -1075,26 +1330,32 @@ function simulate(
         : Number(
             profitFactor.toFixed(2)
           ),
-    expectancyR: Number(
-      expectancyR.toFixed(3)
-    ),
-    netR: Number(
-      totalR.toFixed(2)
-    ),
-    returnPercent: Number(
-      (
-        ((equity - 100000) /
-          100000) *
-        100
-      ).toFixed(2)
-    ),
+    expectancyR:
+      Number(
+        expectancyR.toFixed(3)
+      ),
+    netR:
+      Number(
+        totalR.toFixed(2)
+      ),
+    returnPercent:
+      Number(
+        (
+          ((equity - 100000) /
+            100000) *
+          100
+        ).toFixed(2)
+      ),
     maximumDrawdownPercent:
       Number(
         maximumDrawdown.toFixed(2)
       ),
-    endingEquity: Number(
-      equity.toFixed(2)
-    ),
+    endingEquity:
+      Number(
+        equity.toFixed(2)
+      ),
+    skippedOverlap,
+    skippedDailyLimit,
     passesBasicCriteria:
       totalTrades >= 100 &&
       profitFactor !== null &&
@@ -1114,25 +1375,31 @@ function evaluateModule(
   const trainingSignals =
     signals.filter(
       (signal) =>
-        signal.entryTime < splitTime
+        signal.entryTime <
+        splitTime
     );
 
   const testSignals =
     signals.filter(
       (signal) =>
-        signal.entryTime >= splitTime
+        signal.entryTime >=
+        splitTime
     );
 
   return {
-    all: simulate(signals, m5),
+    all: simulate(
+      signals,
+      m5
+    ),
     training70: simulate(
       trainingSignals,
       m5
     ),
-    outOfSample30: simulate(
-      testSignals,
-      m5
-    ),
+    outOfSample30:
+      simulate(
+        testSignals,
+        m5
+      ),
   };
 }
 
@@ -1166,17 +1433,20 @@ export async function GET() {
       ),
     ]);
 
-    const h1 = toCandles(
-      h1Result.rows
-    ).slice(0, -1);
+    const h1 =
+      toCandles(
+        h1Result.rows
+      ).slice(0, -1);
 
-    const m15 = toCandles(
-      m15Result.rows
-    ).slice(0, -1);
+    const m15 =
+      toCandles(
+        m15Result.rows
+      ).slice(0, -1);
 
-    const m5 = toCandles(
-      m5Result.rows
-    ).slice(0, -1);
+    const m5 =
+      toCandles(
+        m5Result.rows
+      ).slice(0, -1);
 
     if (
       h1.length < 1000 ||
@@ -1189,7 +1459,8 @@ export async function GET() {
             "Historique intraday insuffisant.",
           counts: {
             h1: h1.length,
-            m15: m15.length,
+            m15:
+              m15.length,
             m5: m5.length,
           },
         },
@@ -1197,19 +1468,23 @@ export async function GET() {
       );
     }
 
-    const closesH1 = h1.map(
-      (candle) => candle.close
-    );
+    const closesH1 =
+      h1.map(
+        (candle) =>
+          candle.close
+      );
 
-    const ema20 = emaSeries(
-      closesH1,
-      20
-    );
+    const ema20 =
+      emaSeries(
+        closesH1,
+        20
+      );
 
-    const ema50 = emaSeries(
-      closesH1,
-      50
-    );
+    const ema50 =
+      emaSeries(
+        closesH1,
+        50
+      );
 
     const atr15 =
       atrSeries(m15);
@@ -1225,11 +1500,16 @@ export async function GET() {
 
     const days = [
       ...new Set(
-        m15.map((candle) =>
-          dayStart(candle.time)
+        m15.map(
+          (candle) =>
+            dayStart(
+              candle.time
+            )
         )
       ),
-    ].sort((a, b) => a - b);
+    ].sort(
+      (a, b) => a - b
+    );
 
     const londonSignals =
       createLondonSignals(
@@ -1259,9 +1539,10 @@ export async function GET() {
         chop15
       );
 
-    const splitIndex = Math.floor(
-      m5.length * 0.7
-    );
+    const splitIndex =
+      Math.floor(
+        m5.length * 0.7
+      );
 
     const splitTime =
       m5[splitIndex].time;
@@ -1275,30 +1556,57 @@ export async function GET() {
       {
         symbol: "XAUUSD",
         source: "FTMO-MT5",
+        timezone:
+          "FTMO_SERVER_GMT_PLUS_2_OR_3",
         period: {
-          from: new Date(
-            m5[0].time
-          ).toISOString(),
-          to: new Date(
-            m5[m5.length - 1].time +
-              M5_MS
-          ).toISOString(),
+          from:
+            new Date(
+              m5[0].time
+            ).toISOString(),
+          to:
+            new Date(
+              m5[
+                m5.length - 1
+              ].time +
+                M5_MS
+            ).toISOString(),
           splitTime:
             new Date(
               splitTime
             ).toISOString(),
         },
+        correctedSessions: {
+          asia:
+            "02:00-10:00 FTMO",
+          london:
+            "10:00-14:00 FTMO",
+          preNewYorkRange:
+            "10:00-15:30 FTMO",
+          newYork:
+            "15:30-20:30 FTMO",
+          forcedDailyExit:
+            "23:00 FTMO",
+        },
         assumptions: {
-          startingEquity: 100000,
+          startingEquity:
+            100000,
           riskPercentPerTrade:
             RISK_PERCENT,
-          targetR: TARGET_R,
+          targetR:
+            TARGET_R,
           spread: SPREAD,
-          slippage: SLIPPAGE,
+          slippage:
+            SLIPPAGE,
           maximumTradesPerDay:
             MAX_TRADES_PER_DAY,
+          maximumHoldingHours:
+            (MAX_HOLDING_BARS *
+              5) /
+            60,
           ambiguousBarRule:
             "STOP_FIRST",
+          overnightTrades:
+            false,
           filters:
             "H1 EMA20/50, M15 ADX >= 18, Choppiness <= 61.8",
         },
@@ -1311,27 +1619,34 @@ export async function GET() {
             combinedSignals.length,
         },
         results: {
-          london: evaluateModule(
-            londonSignals,
-            m5,
-            splitTime
-          ),
-          newYork: evaluateModule(
-            newYorkSignals,
-            m5,
-            splitTime
-          ),
-          combined: evaluateModule(
-            combinedSignals,
-            m5,
-            splitTime
-          ),
+          london:
+            evaluateModule(
+              londonSignals,
+              m5,
+              splitTime
+            ),
+          newYork:
+            evaluateModule(
+              newYorkSignals,
+              m5,
+              splitTime
+            ),
+          combined:
+            evaluateModule(
+              combinedSignals,
+              m5,
+              splitTime
+            ),
         },
         acceptanceCriteria: {
-          totalTradesMinimum: 100,
-          profitFactorMinimum: 1.2,
-          expectancyRMinimum: 0.1,
-          maximumDrawdownPercent: 5,
+          totalTradesMinimum:
+            100,
+          profitFactorMinimum:
+            1.2,
+          expectancyRMinimum:
+            0.1,
+          maximumDrawdownPercent:
+            5,
           outOfSampleMustBePositive:
             true,
         },
@@ -1340,7 +1655,8 @@ export async function GET() {
       },
       {
         headers: {
-          "Cache-Control": "no-store",
+          "Cache-Control":
+            "no-store",
         },
       }
     );

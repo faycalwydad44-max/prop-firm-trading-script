@@ -21,12 +21,10 @@ type Signal = {
   entry: number;
   stopLoss: number;
   takeProfit: number;
-  breakoutTime: number;
-  breakoutLevel: number;
+  forcedExitTime: number;
 };
 
 const M5_MS = 5 * 60 * 1000;
-const M15_MS = 15 * 60 * 1000;
 const H1_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
@@ -35,11 +33,9 @@ const SLIPPAGE = 0.05;
 const RISK_PERCENT = 0.1;
 const TARGET_R = 1.5;
 
-const MAX_TRADES_PER_DAY = 2;
 const MAX_HOLDING_BARS = 72;
-const SESSION_START_MINUTE = 6 * 60;
-const SESSION_END_MINUTE = 20 * 60;
-const FORCED_EXIT_MINUTE = 21 * 60;
+const RANGE_DURATION_MINUTES = 30;
+const TRADING_WINDOW_MINUTES = 150;
 
 function toCandles(
   rows: Record<string, unknown>[]
@@ -60,9 +56,7 @@ function emaSeries(
   const output: Array<number | null> =
     new Array(values.length).fill(null);
 
-  if (values.length < period) {
-    return output;
-  }
+  if (values.length < period) return output;
 
   let value =
     values
@@ -131,40 +125,26 @@ function atrSeries(
   return output;
 }
 
-function trueRange(
+function firstIndexAtOrAfter(
   candles: Candle[],
-  index: number
+  timestamp: number
 ) {
-  if (index <= 0) {
-    return candles[index].high - candles[index].low;
+  let low = 0;
+  let high = candles.length;
+
+  while (low < high) {
+    const middle = Math.floor(
+      (low + high) / 2
+    );
+
+    if (candles[middle].time < timestamp) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
   }
 
-  const candle = candles[index];
-  const previousClose = candles[index - 1].close;
-
-  return Math.max(
-    candle.high - candle.low,
-    Math.abs(candle.high - previousClose),
-    Math.abs(candle.low - previousClose)
-  );
-}
-
-function averageTrueRange(
-  candles: Candle[],
-  start: number,
-  end: number
-) {
-  if (start < 1 || end <= start) {
-    return null;
-  }
-
-  let total = 0;
-
-  for (let index = start; index < end; index++) {
-    total += trueRange(candles, index);
-  }
-
-  return total / (end - start);
+  return low;
 }
 
 function lastClosedIndex(
@@ -195,37 +175,6 @@ function lastClosedIndex(
   return result;
 }
 
-function firstIndexAtOrAfter(
-  candles: Candle[],
-  timestamp: number
-) {
-  let low = 0;
-  let high = candles.length;
-
-  while (low < high) {
-    const middle = Math.floor(
-      (low + high) / 2
-    );
-
-    if (candles[middle].time < timestamp) {
-      low = middle + 1;
-    } else {
-      high = middle;
-    }
-  }
-
-  return low;
-}
-
-function minuteOfDay(timestamp: number) {
-  const date = new Date(timestamp);
-
-  return (
-    date.getUTCHours() * 60 +
-    date.getUTCMinutes()
-  );
-}
-
 function dayStart(timestamp: number) {
   const date = new Date(timestamp);
 
@@ -236,9 +185,102 @@ function dayStart(timestamp: number) {
   );
 }
 
+function nthSunday(
+  year: number,
+  month: number,
+  occurrence: number
+) {
+  const firstDay = new Date(
+    Date.UTC(year, month, 1)
+  );
+
+  const daysUntilSunday =
+    (7 - firstDay.getUTCDay()) % 7;
+
+  return Date.UTC(
+    year,
+    month,
+    1 +
+      daysUntilSunday +
+      (occurrence - 1) * 7
+  );
+}
+
+function lastSunday(
+  year: number,
+  month: number
+) {
+  const lastDay = new Date(
+    Date.UTC(year, month + 1, 0)
+  );
+
+  return Date.UTC(
+    year,
+    month,
+    lastDay.getUTCDate() -
+      lastDay.getUTCDay()
+  );
+}
+
+function isUsDst(day: number) {
+  const date = new Date(day);
+  const year = date.getUTCFullYear();
+
+  const start = nthSunday(year, 2, 2);
+  const end = nthSunday(year, 10, 1);
+
+  return day >= start && day < end;
+}
+
+function isEuropeDst(day: number) {
+  const date = new Date(day);
+  const year = date.getUTCFullYear();
+
+  const start = lastSunday(year, 2);
+  const end = lastSunday(year, 9);
+
+  return day >= start && day < end;
+}
+
+function newYorkSessionOnFtmoClock(
+  day: number
+) {
+  const ftmoUtcOffset =
+    isEuropeDst(day) ? 3 : 2;
+
+  const newYorkUtcOffset =
+    isUsDst(day) ? -4 : -5;
+
+  const difference =
+    ftmoUtcOffset - newYorkUtcOffset;
+
+  const openMinute =
+    9 * 60 + 30 + difference * 60;
+
+  const rangeStart =
+    day + openMinute * MINUTE_MS;
+
+  const rangeEnd =
+    rangeStart +
+    RANGE_DURATION_MINUTES * MINUTE_MS;
+
+  const tradeEnd =
+    rangeEnd +
+    TRADING_WINDOW_MINUTES * MINUTE_MS;
+
+  return {
+    rangeStart,
+    rangeEnd,
+    tradeEnd,
+    ftmoUtcOffset,
+    newYorkUtcOffset,
+  };
+}
+
 function h1BiasAt(
   timestamp: number,
   h1: Candle[],
+  ema20: Array<number | null>,
   ema50: Array<number | null>
 ): Bias {
   const index = lastClosedIndex(
@@ -248,27 +290,32 @@ function h1BiasAt(
   );
 
   if (
-    index < 5 ||
+    index < 3 ||
+    ema20[index] === null ||
     ema50[index] === null ||
-    ema50[index - 5] === null
+    ema20[index - 3] === null
   ) {
     return "NEUTRAL";
   }
 
   const close = h1[index].close;
-  const currentEma = ema50[index] as number;
-  const previousEma = ema50[index - 5] as number;
+  const fast = ema20[index] as number;
+  const slow = ema50[index] as number;
+  const previousFast =
+    ema20[index - 3] as number;
 
   if (
-    close > currentEma &&
-    currentEma > previousEma
+    close > slow &&
+    fast > slow &&
+    fast >= previousFast
   ) {
     return "BULLISH";
   }
 
   if (
-    close < currentEma &&
-    currentEma < previousEma
+    close < slow &&
+    fast < slow &&
+    fast <= previousFast
   ) {
     return "BEARISH";
   }
@@ -277,51 +324,59 @@ function h1BiasAt(
 }
 
 function createSignals(
+  days: number[],
   h1: Candle[],
-  m15: Candle[],
   m5: Candle[],
+  ema20H1: Array<number | null>,
   ema50H1: Array<number | null>,
-  atr15: Array<number | null>,
   atr5: Array<number | null>
 ): Signal[] {
   const signals: Signal[] = [];
-  let lastSignalTime = 0;
 
-  for (
-    let index = 50;
-    index < m15.length;
-    index++
-  ) {
-    const breakout = m15[index];
-    const breakoutClose =
-      breakout.time + M15_MS;
+  for (const day of days) {
+    const session =
+      newYorkSessionOnFtmoClock(day);
 
-    const minutes =
-      minuteOfDay(breakoutClose);
+    const rangeStartIndex =
+      firstIndexAtOrAfter(
+        m5,
+        session.rangeStart
+      );
 
-    if (
-      minutes < SESSION_START_MINUTE ||
-      minutes > SESSION_END_MINUTE
-    ) {
+    const rangeEndIndex =
+      firstIndexAtOrAfter(
+        m5,
+        session.rangeEnd
+      );
+
+    const rangeCandles = m5.slice(
+      rangeStartIndex,
+      rangeEndIndex
+    );
+
+    if (rangeCandles.length < 6) {
       continue;
     }
 
-    if (
-      breakoutClose - lastSignalTime <
-      120 * MINUTE_MS
-    ) {
-      continue;
-    }
+    const rangeHigh = Math.max(
+      ...rangeCandles.map(
+        (candle) => candle.high
+      )
+    );
 
-    const volatility = atr15[index];
+    const rangeLow = Math.min(
+      ...rangeCandles.map(
+        (candle) => candle.low
+      )
+    );
 
-    if (volatility === null) {
-      continue;
-    }
+    const rangeWidth =
+      rangeHigh - rangeLow;
 
     const bias = h1BiasAt(
-      breakoutClose,
+      session.rangeEnd,
       h1,
+      ema20H1,
       ema50H1
     );
 
@@ -329,212 +384,98 @@ function createSignals(
       continue;
     }
 
-    const recentCompression =
-      averageTrueRange(
-        m15,
-        index - 8,
-        index
-      );
-
-    const baselineVolatility =
-      averageTrueRange(
-        m15,
-        index - 40,
-        index - 8
-      );
+    const referenceAtr =
+      atr5[Math.max(0, rangeEndIndex - 1)];
 
     if (
-      recentCompression === null ||
-      baselineVolatility === null ||
-      recentCompression >
-        baselineVolatility * 0.8
+      referenceAtr === null ||
+      rangeWidth <
+        referenceAtr * 1.2 ||
+      rangeWidth >
+        referenceAtr * 8
     ) {
       continue;
     }
 
-    const previousRange = m15.slice(
-      index - 20,
-      index
-    );
+    const tradeStart =
+      rangeEndIndex;
 
-    const rangeHigh = Math.max(
-      ...previousRange.map(
-        (candle) => candle.high
-      )
-    );
-
-    const rangeLow = Math.min(
-      ...previousRange.map(
-        (candle) => candle.low
-      )
-    );
-
-    const candleRange =
-      breakout.high - breakout.low;
-
-    const body = Math.abs(
-      breakout.close - breakout.open
-    );
-
-    if (
-      candleRange <= 0 ||
-      body < volatility * 0.7
-    ) {
-      continue;
-    }
-
-    const closeLocation =
-      (breakout.close - breakout.low) /
-      candleRange;
-
-    const buyBreakout =
-      bias === "BULLISH" &&
-      breakout.close > rangeHigh &&
-      closeLocation >= 0.7 &&
-      breakout.close - rangeHigh <=
-        volatility * 1.2;
-
-    const sellBreakout =
-      bias === "BEARISH" &&
-      breakout.close < rangeLow &&
-      closeLocation <= 0.3 &&
-      rangeLow - breakout.close <=
-        volatility * 1.2;
-
-    if (!buyBreakout && !sellBreakout) {
-      continue;
-    }
-
-    const direction: Direction =
-      buyBreakout ? "BUY" : "SELL";
-
-    const breakoutLevel =
-      direction === "BUY"
-        ? rangeHigh
-        : rangeLow;
-
-    const m5Start =
+    const tradeEnd =
       firstIndexAtOrAfter(
         m5,
-        breakoutClose
+        session.tradeEnd
       );
-
-    const m5End = Math.min(
-      m5.length,
-      m5Start + 6
-    );
 
     for (
-      let m5Index = m5Start;
-      m5Index < m5End;
-      m5Index++
+      let index = tradeStart;
+      index < tradeEnd;
+      index++
     ) {
-      const confirmation = m5[m5Index];
-      const volatility5 =
-        atr5[m5Index];
+      const candle = m5[index];
+      const volatility = atr5[index];
 
-      if (volatility5 === null) {
+      if (volatility === null) {
         continue;
       }
 
-      const entryTime =
-        confirmation.time + M5_MS;
+      const candleRange =
+        candle.high - candle.low;
 
-      if (
-        minuteOfDay(entryTime) >
-        SESSION_END_MINUTE
-      ) {
-        break;
-      }
-
-      if (
-        h1BiasAt(
-          entryTime,
-          h1,
-          ema50H1
-        ) !== bias
-      ) {
-        break;
-      }
-
-      const confirmationBody = Math.abs(
-        confirmation.close -
-        confirmation.open
+      const body = Math.abs(
+        candle.close - candle.open
       );
 
-      const continuationBuy =
-        direction === "BUY" &&
-        confirmation.close >
-          breakout.high &&
-        confirmation.close >
-          confirmation.open &&
-        confirmationBody >=
-          volatility5 * 0.3;
-
-      const continuationSell =
-        direction === "SELL" &&
-        confirmation.close <
-          breakout.low &&
-        confirmation.close <
-          confirmation.open &&
-        confirmationBody >=
-          volatility5 * 0.3;
-
-      const retestBuy =
-        direction === "BUY" &&
-        confirmation.low <=
-          breakoutLevel +
-            volatility * 0.15 &&
-        confirmation.close >
-          breakoutLevel &&
-        confirmation.close >
-          confirmation.open;
-
-      const retestSell =
-        direction === "SELL" &&
-        confirmation.high >=
-          breakoutLevel -
-            volatility * 0.15 &&
-        confirmation.close <
-          breakoutLevel &&
-        confirmation.close <
-          confirmation.open;
-
       if (
-        !continuationBuy &&
-        !continuationSell &&
-        !retestBuy &&
-        !retestSell
+        candleRange <= 0 ||
+        body < volatility * 0.45 ||
+        body > volatility * 2.5
       ) {
         continue;
       }
+
+      const closeLocation =
+        (candle.close - candle.low) /
+        candleRange;
+
+      const breakoutBuffer =
+        volatility * 0.05;
+
+      const buyBreakout =
+        bias === "BULLISH" &&
+        candle.close >
+          rangeHigh + breakoutBuffer &&
+        closeLocation >= 0.7;
+
+      const sellBreakout =
+        bias === "BEARISH" &&
+        candle.close <
+          rangeLow - breakoutBuffer &&
+        closeLocation <= 0.3;
+
+      if (!buyBreakout && !sellBreakout) {
+        continue;
+      }
+
+      const direction: Direction =
+        buyBreakout ? "BUY" : "SELL";
 
       const entry =
         direction === "BUY"
-          ? confirmation.close +
+          ? candle.close +
             SPREAD +
             SLIPPAGE
-          : confirmation.close -
+          : candle.close -
             SLIPPAGE;
 
-      const stopBase =
-        direction === "BUY"
-          ? Math.min(
-              breakout.low,
-              confirmation.low
-            )
-          : Math.max(
-              breakout.high,
-              confirmation.high
-            );
+      const rangeMidpoint =
+        (rangeHigh + rangeLow) / 2;
 
       const stopLoss =
         direction === "BUY"
-          ? stopBase -
+          ? rangeMidpoint -
             volatility * 0.1
-          : stopBase +
-            volatility * 0.1 +
-            SPREAD;
+          : rangeMidpoint +
+            volatility * 0.1;
 
       const risk = Math.abs(
         entry - stopLoss
@@ -542,28 +483,28 @@ function createSignals(
 
       if (
         risk <= SPREAD * 1.5 ||
-        risk > volatility * 2.2
+        risk >
+          rangeWidth * 1.8
       ) {
         continue;
       }
 
+      const takeProfit =
+        direction === "BUY"
+          ? entry + risk * TARGET_R
+          : entry - risk * TARGET_R;
+
       signals.push({
         direction,
-        entryTime,
+        entryTime:
+          candle.time + M5_MS,
         entry,
         stopLoss,
-        takeProfit:
-          direction === "BUY"
-            ? entry +
-              risk * TARGET_R
-            : entry -
-              risk * TARGET_R,
-        breakoutTime: breakout.time,
-        breakoutLevel,
+        takeProfit,
+        forcedExitTime:
+          session.tradeEnd,
       });
 
-      lastSignalTime = entryTime;
-      index += 2;
       break;
     }
   }
@@ -594,9 +535,6 @@ function simulate(
   let maximumConsecutiveLosses = 0;
   let currentConsecutiveLosses = 0;
 
-  const dailyTrades =
-    new Map<string, number>();
-
   const monthlyR =
     new Map<string, number>();
 
@@ -613,23 +551,6 @@ function simulate(
       continue;
     }
 
-    const dayKey = new Date(
-      signal.entryTime
-    )
-      .toISOString()
-      .slice(0, 10);
-
-    const monthKey = dayKey.slice(0, 7);
-    const dailyCount =
-      dailyTrades.get(dayKey) || 0;
-
-    if (
-      dailyCount >=
-      MAX_TRADES_PER_DAY
-    ) {
-      continue;
-    }
-
     const start =
       firstIndexAtOrAfter(
         m5,
@@ -640,32 +561,15 @@ function simulate(
       continue;
     }
 
-    const riskDistance =
-      Math.abs(
-        signal.entry -
-        signal.stopLoss
-      );
-
-    const maximumExitTime =
+    const maximumExit =
       signal.entryTime +
       MAX_HOLDING_BARS * M5_MS;
 
-    const forcedExitTime =
-      dayStart(signal.entryTime) +
-      FORCED_EXIT_MINUTE *
-        MINUTE_MS;
-
-    const allowedExitTime =
+    const allowedExit =
       Math.min(
-        maximumExitTime,
-        forcedExitTime
+        maximumExit,
+        signal.forcedExitTime
       );
-
-    const timeExitIndex =
-      firstIndexAtOrAfter(
-        m5,
-        allowedExitTime
-      ) - 1;
 
     const finalIndex =
       Math.min(
@@ -673,12 +577,21 @@ function simulate(
         start +
           MAX_HOLDING_BARS -
           1,
-        timeExitIndex
+        firstIndexAtOrAfter(
+          m5,
+          allowedExit
+        ) - 1
       );
 
     if (finalIndex < start) {
       continue;
     }
+
+    const riskDistance =
+      Math.abs(
+        signal.entry -
+        signal.stopLoss
+      );
 
     let resultR = 0;
     let outcome = "TIME";
@@ -767,6 +680,11 @@ function simulate(
 
     totalR += resultR;
 
+    const monthKey =
+      new Date(signal.entryTime)
+        .toISOString()
+        .slice(0, 7);
+
     monthlyR.set(
       monthKey,
       (monthlyR.get(monthKey) || 0) +
@@ -781,9 +699,7 @@ function simulate(
       resultR < -0.01
     ) {
       losses++;
-      grossLoss +=
-        Math.abs(pnl);
-
+      grossLoss += Math.abs(pnl);
       currentConsecutiveLosses++;
 
       maximumConsecutiveLosses =
@@ -794,11 +710,6 @@ function simulate(
     } else {
       breakeven++;
     }
-
-    dailyTrades.set(
-      dayKey,
-      dailyCount + 1
-    );
 
     lastExitTime = exitTime;
 
@@ -836,12 +747,12 @@ function simulate(
       : 0;
 
   const months = [
-    ...monthlyR.entries(),
+    ...monthlyR.values(),
   ];
 
   const positiveMonths =
     months.filter(
-      ([, value]) => value > 0
+      (value) => value > 0
     ).length;
 
   return {
@@ -937,7 +848,6 @@ export async function GET() {
   try {
     const [
       h1Result,
-      m15Result,
       m5Result,
     ] = await Promise.all([
       pool.query(
@@ -945,13 +855,6 @@ export async function GET() {
          FROM market_candles
          WHERE symbol = 'XAUUSD'
            AND timeframe = 'H1'
-         ORDER BY open_time ASC`
-      ),
-      pool.query(
-        `SELECT open_time, open, high, low, close
-         FROM market_candles
-         WHERE symbol = 'XAUUSD'
-           AND timeframe = 'M15'
          ORDER BY open_time ASC`
       ),
       pool.query(
@@ -968,11 +871,6 @@ export async function GET() {
         h1Result.rows
       ).slice(0, -1);
 
-    const m15 =
-      toCandles(
-        m15Result.rows
-      ).slice(0, -1);
-
     const m5 =
       toCandles(
         m5Result.rows
@@ -980,7 +878,6 @@ export async function GET() {
 
     if (
       h1.length < 1000 ||
-      m15.length < 3000 ||
       m5.length < 10000
     ) {
       return NextResponse.json(
@@ -992,6 +889,15 @@ export async function GET() {
       );
     }
 
+    const ema20H1 =
+      emaSeries(
+        h1.map(
+          (candle) =>
+            candle.close
+        ),
+        20
+      );
+
     const ema50H1 =
       emaSeries(
         h1.map(
@@ -1001,18 +907,28 @@ export async function GET() {
         50
       );
 
-    const atr15 =
-      atrSeries(m15);
-
     const atr5 =
       atrSeries(m5);
 
+    const days = [
+      ...new Set(
+        m5.map(
+          (candle) =>
+            dayStart(
+              candle.time
+            )
+        )
+      ),
+    ].sort(
+      (a, b) => a - b
+    );
+
     const signals = createSignals(
+      days,
       h1,
-      m15,
       m5,
+      ema20H1,
       ema50H1,
-      atr15,
       atr5
     );
 
@@ -1031,12 +947,13 @@ export async function GET() {
     );
 
     const all = results.all;
-    const out = results.outOfSample30;
+    const out =
+      results.outOfSample30;
 
-    const finalValidation =
+    const validation =
       all.totalTrades >= 100 &&
       all.profitFactor !== null &&
-      all.profitFactor >= 1.2 &&
+      all.profitFactor >= 1.25 &&
       all.expectancyR >= 0.1 &&
       all.maximumDrawdownPercent < 5 &&
       out.totalTrades >= 25 &&
@@ -1055,31 +972,39 @@ export async function GET() {
     return NextResponse.json(
       {
         strategy:
-          "VOLATILITY_EXPANSION_BREAKOUT_V1",
+          "NEW_YORK_ORB_V1_FROZEN",
         symbol: "XAUUSD",
         source: "FTMO-MT5",
-        status: finalValidation
+        status: validation
           ? "CANDIDATE_FOR_DEMO"
           : "DO_NOT_TRADE",
+        timing: {
+          newYorkLocalRange:
+            "09:30-10:00 America/New_York",
+          ftmoConversion:
+            "Automatic US and Europe DST",
+          tradeWindow:
+            "150 minutes after opening range",
+        },
         frozenRules: {
-          compression:
-            "TR moyen 8 bougies <= 80% du TR moyen precedent",
-          breakout:
-            "Cassure range M15 20 bougies, corps >= 0.7 ATR",
+          range:
+            "First 30 minutes after New York cash open",
           bias:
-            "H1 au-dessus/sous EMA50 avec pente",
-          confirmation:
-            "Continuation ou retest M5",
-          targetR: TARGET_R,
+            "H1 EMA20/50 with EMA20 slope",
+          breakout:
+            "M5 close outside range with 0.45 ATR body",
+          stop:
+            "Opening range midpoint plus ATR buffer",
+          targetR:
+            TARGET_R,
           riskPercent:
             RISK_PERCENT,
-          sessionUtc:
-            "06:00-20:00",
-          spread: SPREAD,
-          slippage: SLIPPAGE,
+          spread:
+            SPREAD,
+          slippage:
+            SLIPPAGE,
           maximumTradesPerDay:
-            MAX_TRADES_PER_DAY,
-          overnightTrades: false,
+            1,
           ambiguousBar:
             "STOP_FIRST",
         },
@@ -1119,7 +1044,7 @@ export async function GET() {
             all.totalTrades >= 100,
           allProfitFactor:
             all.profitFactor !== null &&
-            all.profitFactor >= 1.2,
+            all.profitFactor >= 1.25,
           allExpectancy:
             all.expectancyR >= 0.1,
           drawdown:
@@ -1134,7 +1059,7 @@ export async function GET() {
           outOfSamplePositive:
             out.netR > 0,
           finalDecision:
-            finalValidation
+            validation
               ? "SHORT_DEMO_TEST_ALLOWED"
               : "DO_NOT_TRADE",
         },
@@ -1150,14 +1075,14 @@ export async function GET() {
     );
   } catch (error) {
     console.error(
-      "Erreur volatility breakout:",
+      "Erreur NY ORB:",
       error
     );
 
     return NextResponse.json(
       {
         error:
-          "Backtest Volatility Breakout impossible.",
+          "Backtest NY ORB impossible.",
       },
       { status: 500 }
     );

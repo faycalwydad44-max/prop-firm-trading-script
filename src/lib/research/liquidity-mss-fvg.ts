@@ -16,7 +16,10 @@ import {
   ResearchSignal,
 } from "./simulator";
 
-type Bias = "BULLISH" | "BEARISH" | "NEUTRAL";
+type Bias =
+  | "BULLISH"
+  | "BEARISH"
+  | "NEUTRAL";
 
 type PoiKind =
   | "PREVIOUS_DAY_HIGH"
@@ -75,17 +78,18 @@ type AttemptResult = {
   reachedRetest: boolean;
 };
 
-export type LiquiditySignal = ResearchSignal & {
-  poiId: string;
-  poiKind: PoiKind;
-  poiLevel: number;
-  sweepTime: number;
-  mssTime: number;
-  fvgTime: number;
-  fvgLow: number;
-  fvgHigh: number;
-  targetLiquidity: number;
-};
+export type LiquiditySignal =
+  ResearchSignal & {
+    poiId: string;
+    poiKind: PoiKind;
+    poiLevel: number;
+    sweepTime: number;
+    mssTime: number;
+    fvgTime: number;
+    fvgLow: number;
+    fvgHigh: number;
+    targetLiquidity: number;
+  };
 
 export type LiquidityDetectionResult = {
   signals: LiquiditySignal[];
@@ -135,38 +139,49 @@ const SLIPPAGE = 0.05;
 const STOP_ATR_BUFFER = 0.1;
 
 const londonFormatter =
-  new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+  new Intl.DateTimeFormat(
+    "en-GB",
+    {
+      timeZone: "Europe/London",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }
+  );
 
 const newYorkFormatter =
-  new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+  new Intl.DateTimeFormat(
+    "en-US",
+    {
+      timeZone:
+        "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }
+  );
 
 function localMinutes(
   timestamp: number,
-  formatter: Intl.DateTimeFormat
+  formatter:
+    Intl.DateTimeFormat
 ) {
-  const parts = formatter.formatToParts(
-    new Date(timestamp)
-  );
+  const parts =
+    formatter.formatToParts(
+      new Date(timestamp)
+    );
 
   const hour = Number(
     parts.find(
-      (part) => part.type === "hour"
+      (part) =>
+        part.type === "hour"
     )?.value || 0
   );
 
   const minute = Number(
     parts.find(
-      (part) => part.type === "minute"
+      (part) =>
+        part.type === "minute"
     )?.value || 0
   );
 
@@ -176,21 +191,28 @@ function localMinutes(
 function insideTradingSession(
   timestamp: number
 ) {
-  const london = localMinutes(
-    timestamp,
-    londonFormatter
-  );
+  const london =
+    localMinutes(
+      timestamp,
+      londonFormatter
+    );
 
-  const newYork = localMinutes(
-    timestamp,
-    newYorkFormatter
-  );
+  const newYork =
+    localMinutes(
+      timestamp,
+      newYorkFormatter
+    );
 
   return (
-    (london >= 8 * 60 &&
-      london <= 12 * 60) ||
-    (newYork >= 8 * 60 + 30 &&
-      newYork <= 12 * 60)
+    (
+      london >= 8 * 60 &&
+      london <= 12 * 60
+    ) ||
+    (
+      newYork >=
+        8 * 60 + 30 &&
+      newYork <= 12 * 60
+    )
   );
 }
 
@@ -215,19 +237,27 @@ function confirmedPivots(
   right: number
 ): PivotSeries {
   const high: NumberSeries =
-    new Array(candles.length).fill(null);
+    new Array(
+      candles.length
+    ).fill(null);
 
   const low: NumberSeries =
-    new Array(candles.length).fill(null);
+    new Array(
+      candles.length
+    ).fill(null);
 
   const pivots: Pivot[] = [];
 
-  let latestHigh: number | null = null;
-  let latestLow: number | null = null;
+  let latestHigh:
+    number | null = null;
+
+  let latestLow:
+    number | null = null;
 
   for (
     let confirmedAt = 0;
-    confirmedAt < candles.length;
+    confirmedAt <
+      candles.length;
     confirmedAt++
   ) {
     const pivotIndex =
@@ -238,36 +268,48 @@ function confirmedPivots(
       let isLow = true;
 
       for (
-        let index = pivotIndex - left;
-        index <= pivotIndex + right;
+        let index =
+          pivotIndex - left;
+        index <=
+          pivotIndex + right;
         index++
       ) {
-        if (index === pivotIndex) {
+        if (
+          index === pivotIndex
+        ) {
           continue;
         }
 
         if (
           candles[index].high >=
-          candles[pivotIndex].high
+          candles[
+            pivotIndex
+          ].high
         ) {
           isHigh = false;
         }
 
         if (
           candles[index].low <=
-          candles[pivotIndex].low
+          candles[
+            pivotIndex
+          ].low
         ) {
           isLow = false;
         }
       }
 
       const confirmationTime =
-        candles[confirmedAt].time +
+        candles[
+          confirmedAt
+        ].time +
         duration;
 
       if (isHigh) {
         latestHigh =
-          candles[pivotIndex].high;
+          candles[
+            pivotIndex
+          ].high;
 
         pivots.push({
           kind: "HIGH",
@@ -279,7 +321,9 @@ function confirmedPivots(
 
       if (isLow) {
         latestLow =
-          candles[pivotIndex].low;
+          candles[
+            pivotIndex
+          ].low;
 
         pivots.push({
           kind: "LOW",
@@ -290,8 +334,11 @@ function confirmedPivots(
       }
     }
 
-    high[confirmedAt] = latestHigh;
-    low[confirmedAt] = latestLow;
+    high[confirmedAt] =
+      latestHigh;
+
+    low[confirmedAt] =
+      latestLow;
   }
 
   return {
@@ -306,11 +353,12 @@ function buildStructureBias(
   pivots: PivotSeries
 ) {
   const bias: Bias[] =
-    new Array(h1.length).fill(
-      "NEUTRAL"
-    );
+    new Array(
+      h1.length
+    ).fill("NEUTRAL");
 
-  let current: Bias = "NEUTRAL";
+  let current: Bias =
+    "NEUTRAL";
 
   for (
     let index = 1;
@@ -348,11 +396,12 @@ function biasAt(
   h1: Candle[],
   structureBias: Bias[]
 ) {
-  const index = lastClosedIndex(
-    h1,
-    H1_MS,
-    timestamp
-  );
+  const index =
+    lastClosedIndex(
+      h1,
+      H1_MS,
+      timestamp
+    );
 
   return index >= 0
     ? structureBias[index]
@@ -363,8 +412,10 @@ function poiPriority(
   kind: PoiKind
 ) {
   if (
-    kind === "PREVIOUS_DAY_HIGH" ||
-    kind === "PREVIOUS_DAY_LOW"
+    kind ===
+      "PREVIOUS_DAY_HIGH" ||
+    kind ===
+      "PREVIOUS_DAY_LOW"
   ) {
     return 1;
   }
@@ -390,11 +441,19 @@ function buildDailyPois(
   h1: Candle[]
 ) {
   const map =
-    new Map<number, Candle[]>();
+    new Map<
+      number,
+      Candle[]
+    >();
 
-  for (const candle of h1) {
+  for (
+    const candle
+    of h1
+  ) {
     const day =
-      dayStart(candle.time);
+      dayStart(
+        candle.time
+      );
 
     const current =
       map.get(day) || [];
@@ -424,43 +483,55 @@ function buildDailyPois(
       days[index];
 
     const candles =
-      map.get(previousDay) || [];
+      map.get(
+        previousDay
+      ) || [];
 
-    if (candles.length === 0) {
+    if (
+      candles.length === 0
+    ) {
       continue;
     }
 
     const high = Math.max(
       ...candles.map(
-        (candle) => candle.high
+        (candle) =>
+          candle.high
       )
     );
 
     const low = Math.min(
       ...candles.map(
-        (candle) => candle.low
+        (candle) =>
+          candle.low
       )
     );
 
     pois.push({
-      id: `PDH:${previousDay}`,
-      kind: "PREVIOUS_DAY_HIGH",
+      id:
+        `PDH:${previousDay}`,
+      kind:
+        "PREVIOUS_DAY_HIGH",
       direction: "SELL",
       low: high,
       high,
       level: high,
-      createdTime: currentDay,
+      createdTime:
+        currentDay,
       priority: 1,
     });
 
     pois.push({
-      id: `PDL:${previousDay}`,
-      kind: "PREVIOUS_DAY_LOW",
+      id:
+        `PDL:${previousDay}`,
+      kind:
+        "PREVIOUS_DAY_LOW",
       direction: "BUY",
       low,
       high: low,
       level: low,
-      createdTime: currentDay,
+      createdTime:
+        currentDay,
       priority: 1,
     });
   }
@@ -474,7 +545,8 @@ function buildSwingPois(
   return pivots.pivots.map(
     (pivot): Poi => {
       const kind: PoiKind =
-        pivot.kind === "HIGH"
+        pivot.kind ===
+          "HIGH"
           ? "SWING_HIGH"
           : "SWING_LOW";
 
@@ -483,7 +555,8 @@ function buildSwingPois(
           `${kind}:${pivot.index}`,
         kind,
         direction:
-          pivot.kind === "HIGH"
+          pivot.kind ===
+          "HIGH"
             ? "SELL"
             : "BUY",
         low: pivot.price,
@@ -501,10 +574,12 @@ function buildSwingPois(
 function buildEqualPois(
   pivots: PivotSeries
 ) {
-  const output: Poi[] = [];
+  const output: Poi[] =
+    [];
 
   for (
-    const kind of [
+    const kind
+    of [
       "HIGH",
       "LOW",
     ] as const
@@ -562,14 +637,16 @@ function buildEqualPois(
       }
 
       const level =
-        (previous.price +
-          current.price) /
-        2;
+        (
+          previous.price +
+          current.price
+        ) / 2;
 
-      const poiKind: PoiKind =
-        kind === "HIGH"
-          ? "EQUAL_HIGH"
-          : "EQUAL_LOW";
+      const poiKind:
+        PoiKind =
+          kind === "HIGH"
+            ? "EQUAL_HIGH"
+            : "EQUAL_LOW";
 
       output.push({
         id:
@@ -583,7 +660,8 @@ function buildEqualPois(
         high: level,
         level,
         createdTime:
-          current.confirmationTime,
+          current
+            .confirmationTime,
         priority: 3,
       });
     }
@@ -630,7 +708,9 @@ function buildSupplyDemandPois(
   pivots: PivotSeries,
   atrH1: NumberSeries
 ) {
-  const output: Poi[] = [];
+  const output: Poi[] =
+    [];
+
   const usedBos =
     new Set<string>();
 
@@ -643,12 +723,18 @@ function buildSupplyDemandPois(
       atrH1[index];
 
     const previousHigh =
-      pivots.high[index - 1];
+      pivots.high[
+        index - 1
+      ];
 
     const previousLow =
-      pivots.low[index - 1];
+      pivots.low[
+        index - 1
+      ];
 
-    if (volatility === null) {
+    if (
+      volatility === null
+    ) {
       continue;
     }
 
@@ -703,7 +789,9 @@ function buildSupplyDemandPois(
     const key =
       `${direction}:${bosLevel}`;
 
-    if (usedBos.has(key)) {
+    if (
+      usedBos.has(key)
+    ) {
       continue;
     }
 
@@ -755,7 +843,8 @@ function buildSupplyDemandPois(
           ? low
           : high,
       createdTime:
-        candle.time + H1_MS,
+        candle.time +
+        H1_MS,
       priority: 2,
     });
   }
@@ -786,9 +875,14 @@ function buildPois(
   ];
 
   const unique =
-    new Map<string, Poi>();
+    new Map<
+      string,
+      Poi
+    >();
 
-  for (const poi of all) {
+  for (
+    const poi of all
+  ) {
     unique.set(
       poi.id,
       poi
@@ -808,8 +902,10 @@ function isZonePoi(
   poi: Poi
 ) {
   return (
-    poi.kind === "SUPPLY" ||
-    poi.kind === "DEMAND"
+    poi.kind ===
+      "SUPPLY" ||
+    poi.kind ===
+      "DEMAND"
   );
 }
 
@@ -817,9 +913,13 @@ function invalidatedByClose(
   poi: Poi,
   candle: Candle
 ) {
-  return poi.direction === "BUY"
-    ? candle.close < poi.low
-    : candle.close > poi.high;
+  return (
+    poi.direction === "BUY"
+      ? candle.close <
+        poi.low
+      : candle.close >
+        poi.high
+  );
 }
 
 function isSweep(
@@ -827,36 +927,46 @@ function isSweep(
   candle: Candle,
   volatility: number
 ) {
-  if (poi.direction === "BUY") {
+  if (
+    poi.direction === "BUY"
+  ) {
     if (isZonePoi(poi)) {
       return (
-        candle.low < poi.low &&
-        candle.close >= poi.low &&
+        candle.low <
+          poi.low &&
+        candle.close >=
+          poi.low &&
         candle.close <=
           poi.high +
-            volatility * 0.1
+          volatility * 0.1
       );
     }
 
     return (
-      candle.low < poi.level &&
-      candle.close > poi.level
+      candle.low <
+        poi.level &&
+      candle.close >
+        poi.level
     );
   }
 
   if (isZonePoi(poi)) {
     return (
-      candle.high > poi.high &&
-      candle.close <= poi.high &&
+      candle.high >
+        poi.high &&
+      candle.close <=
+        poi.high &&
       candle.close >=
         poi.low -
-          volatility * 0.1
+        volatility * 0.1
     );
   }
 
   return (
-    candle.high > poi.level &&
-    candle.close < poi.level
+    candle.high >
+      poi.level &&
+    candle.close <
+      poi.level
   );
 }
 
@@ -864,13 +974,15 @@ function targetPrice(
   poi: Poi
 ) {
   if (
-    poi.kind === "SUPPLY"
+    poi.kind ===
+    "SUPPLY"
   ) {
     return poi.low;
   }
 
   if (
-    poi.kind === "DEMAND"
+    poi.kind ===
+    "DEMAND"
   ) {
     return poi.high;
   }
@@ -878,41 +990,61 @@ function targetPrice(
   return poi.level;
 }
 
-function nearestTarget(
-  direction: Direction,
-  entry: number,
-  entryTime: number,
-  pois: Poi[]
+function liquidityTakenByCandle(
+  poi: Poi,
+  candle: Candle
 ) {
-  const prices = pois
-    .filter(
-      (poi) =>
-        poi.createdTime <=
-          entryTime &&
-        poi.direction !==
-          direction
-    )
-    .map(targetPrice)
-    .filter(
-      (price) =>
-        direction === "BUY"
-          ? price > entry
-          : price < entry
+  const price =
+    targetPrice(poi);
+
+  return (
+    poi.direction === "BUY"
+      ? candle.low <= price
+      : candle.high >= price
+  );
+}
+
+function poiConsumedBetween(
+  poi: Poi,
+  m5: Candle[],
+  fromTime: number,
+  toTime: number
+) {
+  const start =
+    firstIndexAtOrAfter(
+      m5,
+      fromTime
     );
 
-  if (prices.length === 0) {
-    return null;
+  const end =
+    firstIndexAtOrAfter(
+      m5,
+      toTime
+    );
+
+  for (
+    let index = start;
+    index < end;
+    index++
+  ) {
+    if (
+      liquidityTakenByCandle(
+        poi,
+        m5[index]
+      )
+    ) {
+      return true;
+    }
   }
 
-  return direction === "BUY"
-    ? Math.min(...prices)
-    : Math.max(...prices);
+  return false;
 }
 
 function poiInvalidatedBetween(
   poi: Poi,
-  data: ResearchMarketData,
-  sweepM15Index: number,
+  data:
+    ResearchMarketData,
+  fromM15Index: number,
   timestamp: number
 ) {
   const endIndex =
@@ -924,7 +1056,10 @@ function poiInvalidatedBetween(
 
   for (
     let index =
-      sweepM15Index + 1;
+      Math.max(
+        0,
+        fromM15Index + 1
+      );
     index <= endIndex;
     index++
   ) {
@@ -941,20 +1076,129 @@ function poiInvalidatedBetween(
   return false;
 }
 
+function nearestTarget(
+  direction: Direction,
+  entry: number,
+  entryTime: number,
+  pois: Poi[],
+  unavailablePoiIds:
+    ReadonlySet<string>,
+  data:
+    ResearchMarketData,
+  sweepM15Index: number,
+  consumptionStartTime:
+    number
+) {
+  const candidates =
+    pois
+      .filter((poi) => {
+        if (
+          poi.createdTime >
+            entryTime ||
+          poi.direction ===
+            direction ||
+          unavailablePoiIds.has(
+            poi.id
+          )
+        ) {
+          return false;
+        }
+
+        if (
+          entryTime -
+            poi.createdTime >
+          POI_EXPIRY_DAYS *
+            24 *
+            H1_MS
+        ) {
+          return false;
+        }
+
+        const poiStartIndex =
+          Math.max(
+            sweepM15Index,
+            firstIndexAtOrAfter(
+              data.m15,
+              poi.createdTime
+            ) - 1
+          );
+
+        if (
+          poiInvalidatedBetween(
+            poi,
+            data,
+            poiStartIndex,
+            entryTime
+          )
+        ) {
+          return false;
+        }
+
+        const consumptionStart =
+          Math.max(
+            consumptionStartTime,
+            poi.createdTime
+          );
+
+        if (
+          poiConsumedBetween(
+            poi,
+            data.m5,
+            consumptionStart,
+            entryTime
+          )
+        ) {
+          return false;
+        }
+
+        return true;
+      })
+      .map((poi) => ({
+        poi,
+        price:
+          targetPrice(poi),
+      }))
+      .filter(
+        ({ price }) =>
+          direction === "BUY"
+            ? price > entry
+            : price < entry
+      );
+
+  if (
+    candidates.length === 0
+  ) {
+    return null;
+  }
+
+  candidates.sort(
+    (left, right) =>
+      direction === "BUY"
+        ? left.price -
+          right.price
+        : right.price -
+          left.price
+  );
+
+  return candidates[0];
+}
+
 function updateExtreme(
   direction: Direction,
   current: number,
   candle: Candle
 ) {
-  return direction === "BUY"
-    ? Math.min(
-        current,
-        candle.low
-      )
-    : Math.max(
-        current,
-        candle.high
-      );
+  return (
+    direction === "BUY"
+      ? Math.min(
+          current,
+          candle.low
+        )
+      : Math.max(
+          current,
+          candle.high
+        )
+  );
 }
 
 function stopWasTouched(
@@ -962,11 +1206,14 @@ function stopWasTouched(
   candle: Candle,
   stopLoss: number
 ) {
-  return direction === "BUY"
-    ? candle.low <= stopLoss
-    : candle.high +
-        SPREAD >=
-      stopLoss;
+  return (
+    direction === "BUY"
+      ? candle.low <=
+        stopLoss
+      : candle.high +
+          SPREAD >=
+        stopLoss
+  );
 }
 
 function targetWasTouched(
@@ -974,11 +1221,14 @@ function targetWasTouched(
   candle: Candle,
   target: number
 ) {
-  return direction === "BUY"
-    ? candle.high >= target
-    : candle.low +
-        SPREAD <=
-      target;
+  return (
+    direction === "BUY"
+      ? candle.high >=
+        target
+      : candle.low +
+          SPREAD <=
+        target
+  );
 }
 
 function rejected(
@@ -1001,17 +1251,23 @@ function createSignalAfterSweep(
   poi: Poi,
   sweep: Candle,
   sweepM15Index: number,
-  data: ResearchMarketData,
-  m5Pivots: PivotSeries,
-  atrM5: NumberSeries,
+  data:
+    ResearchMarketData,
+  m5Pivots:
+    PivotSeries,
+  atrM5:
+    NumberSeries,
   atrM15Value: number,
-  pois: Poi[]
+  pois: Poi[],
+  unavailablePoiIds:
+    ReadonlySet<string>
 ): AttemptResult {
   const direction =
     poi.direction;
 
   const sweepClose =
-    sweep.time + M15_MS;
+    sweep.time +
+    M15_MS;
 
   const sweepStart =
     firstIndexAtOrAfter(
@@ -1068,7 +1324,8 @@ function createSignalAfterSweep(
       : Number.NEGATIVE_INFINITY;
 
   for (
-    let index = sweepStart;
+    let index =
+      sweepStart;
     index < mssStart;
     index++
   ) {
@@ -1080,11 +1337,12 @@ function createSignalAfterSweep(
       );
   }
 
-  const mssEnd = Math.min(
-    data.m5.length,
-    mssStart +
-      MSS_MAXIMUM_BARS
-  );
+  const mssEnd =
+    Math.min(
+      data.m5.length,
+      mssStart +
+        MSS_MAXIMUM_BARS
+    );
 
   let mssIndex = -1;
 
@@ -1097,7 +1355,8 @@ function createSignalAfterSweep(
       data.m5[index];
 
     const closeTime =
-      candle.time + M5_MS;
+      candle.time +
+      M5_MS;
 
     sweepExtreme =
       updateExtreme(
@@ -1122,14 +1381,17 @@ function createSignalAfterSweep(
     const volatility =
       atrM5[index];
 
-    if (volatility === null) {
+    if (
+      volatility === null
+    ) {
       continue;
     }
 
-    const body = Math.abs(
-      candle.close -
-        candle.open
-    );
+    const body =
+      Math.abs(
+        candle.close -
+          candle.open
+      );
 
     const bullishMss =
       direction === "BUY" &&
@@ -1167,30 +1429,31 @@ function createSignalAfterSweep(
   }
 
   const mssClose =
-    data.m5[mssIndex].time +
+    data.m5[
+      mssIndex
+    ].time +
     M5_MS;
+
+  const mssAtr =
+    atrM5[mssIndex] ??
+    atrM15Value;
 
   const frozenStop =
     direction === "BUY"
       ? sweepExtreme -
-        (
-          atrM5[mssIndex] ??
-          atrM15Value
-        ) *
+        mssAtr *
           STOP_ATR_BUFFER
       : sweepExtreme +
-        (
-          atrM5[mssIndex] ??
-          atrM15Value
-        ) *
+        mssAtr *
           STOP_ATR_BUFFER +
         SPREAD;
 
-  const fvgEnd = Math.min(
-    data.m5.length,
-    mssIndex +
-      FVG_MAXIMUM_BARS
-  );
+  const fvgEnd =
+    Math.min(
+      data.m5.length,
+      mssIndex +
+        FVG_MAXIMUM_BARS
+    );
 
   let fvgIndex = -1;
   let fvgLow = 0;
@@ -1223,15 +1486,19 @@ function createSignalAfterSweep(
 
     if (bullishFvg) {
       fvgIndex = index;
-      fvgLow = first.high;
-      fvgHigh = third.low;
+      fvgLow =
+        first.high;
+      fvgHigh =
+        third.low;
       break;
     }
 
     if (bearishFvg) {
       fvgIndex = index;
-      fvgLow = third.high;
-      fvgHigh = first.low;
+      fvgLow =
+        third.high;
+      fvgHigh =
+        first.low;
       break;
     }
   }
@@ -1244,8 +1511,10 @@ function createSignalAfterSweep(
   }
 
   const midpoint =
-    (fvgLow + fvgHigh) /
-    2;
+    (
+      fvgLow +
+      fvgHigh
+    ) / 2;
 
   const provisionalEntry =
     direction === "BUY"
@@ -1254,29 +1523,6 @@ function createSignalAfterSweep(
         SLIPPAGE
       : midpoint -
         SLIPPAGE;
-
-  const target =
-    nearestTarget(
-      direction,
-      provisionalEntry,
-      data.m5[fvgIndex].time +
-        M5_MS,
-      pois
-    );
-
-  if (target === null) {
-    return rejected(
-      "NO_TARGET",
-      true,
-      true
-    );
-  }
-
-  const initialRisk =
-    Math.abs(
-      provisionalEntry -
-        frozenStop
-    );
 
   if (
     direction === "BUY"
@@ -1292,6 +1538,12 @@ function createSignalAfterSweep(
     );
   }
 
+  const initialRisk =
+    Math.abs(
+      provisionalEntry -
+        frozenStop
+    );
+
   if (
     initialRisk <=
       SPREAD * 1.5 ||
@@ -1304,6 +1556,34 @@ function createSignalAfterSweep(
       true
     );
   }
+
+  const targetResult =
+    nearestTarget(
+      direction,
+      provisionalEntry,
+      data.m5[
+        fvgIndex
+      ].time +
+        M5_MS,
+      pois,
+      unavailablePoiIds,
+      data,
+      sweepM15Index,
+      sweep.time
+    );
+
+  if (
+    targetResult === null
+  ) {
+    return rejected(
+      "NO_TARGET",
+      true,
+      true
+    );
+  }
+
+  const target =
+    targetResult.price;
 
   const targetR =
     Math.abs(
@@ -1334,7 +1614,8 @@ function createSignalAfterSweep(
     );
 
   for (
-    let index = retestStart;
+    let index =
+      retestStart;
     index < retestEnd;
     index++
   ) {
@@ -1342,7 +1623,8 @@ function createSignalAfterSweep(
       data.m5[index];
 
     const candleClose =
-      candle.time + M5_MS;
+      candle.time +
+      M5_MS;
 
     if (
       !sameUtcDay(
@@ -1427,9 +1709,11 @@ function createSignalAfterSweep(
     const entry =
       provisionalEntry;
 
-    const risk = Math.abs(
-      entry - frozenStop
-    );
+    const risk =
+      Math.abs(
+        entry -
+          frozenStop
+      );
 
     if (
       direction === "BUY"
@@ -1478,7 +1762,7 @@ function createSignalAfterSweep(
     return {
       signal: {
         strategy:
-          `LIQUIDITY_MSS_FVG_V2:${poi.kind}`,
+          `LIQUIDITY_MSS_FVG_V3:${poi.kind}`,
         direction,
         entryTime:
           candle.time,
@@ -1634,6 +1918,9 @@ export function createLiquidityMssFvgSignals(
   const invalidPois =
     new Set<string>();
 
+  const consumedPois =
+    new Set<string>();
+
   const statistics:
     LiquidityDetectionResult[
       "statistics"
@@ -1669,16 +1956,55 @@ export function createLiquidityMssFvgSignals(
       data.m15[index];
 
     const closeTime =
-      candle.time + M15_MS;
+      candle.time +
+      M15_MS;
 
     const volatility =
       atrM15[index];
 
-    if (volatility === null) {
+    if (
+      volatility === null
+    ) {
       continue;
     }
 
-    for (const poi of pois) {
+    if (index > 20) {
+      const previousCandle =
+        data.m15[
+          index - 1
+        ];
+
+      const previousClose =
+        previousCandle.time +
+        M15_MS;
+
+      for (
+        const poi of pois
+      ) {
+        if (
+          poi.createdTime <
+            previousClose &&
+          !usedPois.has(
+            poi.id
+          ) &&
+          !invalidPois.has(
+            poi.id
+          ) &&
+          liquidityTakenByCandle(
+            poi,
+            previousCandle
+          )
+        ) {
+          consumedPois.add(
+            poi.id
+          );
+        }
+      }
+    }
+
+    for (
+      const poi of pois
+    ) {
       if (
         poi.createdTime >=
           closeTime ||
@@ -1736,7 +2062,9 @@ export function createLiquidityMssFvgSignals(
         structureBias
       );
 
-    if (bias === "NEUTRAL") {
+    if (
+      bias === "NEUTRAL"
+    ) {
       continue;
     }
 
@@ -1758,6 +2086,9 @@ export function createLiquidityMssFvgSignals(
               poi.id
             ) &&
             !invalidPois.has(
+              poi.id
+            ) &&
+            !consumedPois.has(
               poi.id
             ) &&
             isSweep(
@@ -1789,6 +2120,13 @@ export function createLiquidityMssFvgSignals(
 
     statistics.sweeps++;
 
+    const unavailablePoiIds =
+      new Set<string>([
+        ...invalidPois,
+        ...usedPois,
+        ...consumedPois,
+      ]);
+
     const attempt =
       createSignalAfterSweep(
         poi,
@@ -1798,8 +2136,13 @@ export function createLiquidityMssFvgSignals(
         m5Pivots,
         atrM5,
         volatility,
-        pois
+        pois,
+        unavailablePoiIds
       );
+
+    consumedPois.add(
+      poi.id
+    );
 
     if (
       attempt.reachedMss
@@ -1816,7 +2159,8 @@ export function createLiquidityMssFvgSignals(
     if (
       attempt.reachedRetest
     ) {
-      statistics.fvgRetests++;
+      statistics
+        .fvgRetests++;
     }
 
     incrementRejection(

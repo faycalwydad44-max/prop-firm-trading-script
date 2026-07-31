@@ -57,6 +57,13 @@ type Poi = {
   priority: number;
 };
 
+type SweepExcursion = {
+  poi: Poi;
+  startIndex: number;
+  startTime: number;
+  extreme: number;
+};
+
 type AttemptRejection =
   | "NO_LOCKED_SWING"
   | "POI_INVALIDATED_BEFORE_MSS"
@@ -111,6 +118,8 @@ export type LiquiditySignal =
     poiKind: PoiKind;
     poiLevel: number;
     sweepTime: number;
+    sweepReturnTime: number;
+    sweepExtreme: number;
     mssTime: number;
     fvgTime: number;
     fvgLow: number;
@@ -128,6 +137,8 @@ export type LiquidityDetectionResult = {
   signals: LiquiditySignal[];
   statistics: {
     pois: number;
+    excursionsStarted: number;
+    excursionsExpired: number;
     sweeps: number;
     mss: number;
     fvg: number;
@@ -161,13 +172,13 @@ const M5_PIVOT_LEFT = 2;
 const M5_PIVOT_RIGHT = 2;
 
 const IMPULSE_BODY_ATR = 0.9;
-
 const BASE_MSS_BODY_ATR = 0.5;
 const EXCELLENT_MSS_BODY_ATR = 0.75;
 
 const CLEAN_FVG_MINIMUM_ATR = 0.1;
 const SMALL_FVG_MAXIMUM_ATR = 0.25;
 
+const SWEEP_RETURN_MAXIMUM_BARS = 3;
 const MSS_MAXIMUM_BARS = 12;
 const FVG_MAXIMUM_BARS = 4;
 const FVG_RETEST_MAXIMUM_BARS = 12;
@@ -239,14 +250,10 @@ function insideTradingSession(
   );
 
   return (
-    (
-      london >= 8 * 60 &&
-      london <= 12 * 60
-    ) ||
-    (
-      newYork >= 8 * 60 + 30 &&
-      newYork <= 12 * 60
-    )
+    (london >= 8 * 60 &&
+      london <= 12 * 60) ||
+    (newYork >= 8 * 60 + 30 &&
+      newYork <= 12 * 60)
   );
 }
 
@@ -404,12 +411,11 @@ function biasAt(
   h1: Candle[],
   structureBias: Bias[]
 ) {
-  const index =
-    lastClosedIndex(
-      h1,
-      H1_MS,
-      timestamp
-    );
+  const index = lastClosedIndex(
+    h1,
+    H1_MS,
+    timestamp
+  );
 
   return index >= 0
     ? structureBias[index]
@@ -422,12 +428,11 @@ function cleanH1StructureAt(
   h1: Candle[],
   structureBias: Bias[]
 ) {
-  const index =
-    lastClosedIndex(
-      h1,
-      H1_MS,
-      timestamp
-    );
+  const index = lastClosedIndex(
+    h1,
+    H1_MS,
+    timestamp
+  );
 
   if (
     index < 3 ||
@@ -709,13 +714,11 @@ function buildProtectedSwingPois(
 
         output.push({
           id: key,
-          kind:
-            "PROTECTED_HIGH",
+          kind: "PROTECTED_HIGH",
           direction: "SELL",
           low: latestHigh.price,
           high: latestHigh.price,
-          level:
-            latestHigh.price,
+          level: latestHigh.price,
           createdTime:
             candleCloseTime,
           priority: 4,
@@ -1195,7 +1198,20 @@ function poiInvalidatedBetween(
   return false;
 }
 
-function isSweep(
+function crossedPoiBoundary(
+  poi: Poi,
+  candle: Candle
+) {
+  return (
+    poi.direction === "BUY"
+      ? candle.low <
+        poi.low
+      : candle.high >
+        poi.high
+  );
+}
+
+function returnedInsideAfterSweep(
   poi: Poi,
   candle: Candle,
   volatility: number
@@ -1203,49 +1219,34 @@ function isSweep(
   if (
     poi.direction === "BUY"
   ) {
-    if (isZonePoi(poi)) {
-      return (
-        candle.low <
-          poi.low &&
-        candle.close >=
-          poi.low &&
+    return (
+      candle.close >=
+        poi.low &&
+      (
+        !isZonePoi(poi) ||
         candle.close <=
           poi.high +
           volatility * 0.1
-      );
-    }
-
-    return (
-      candle.low <
-        poi.level &&
-      candle.close >
-        poi.level
-    );
-  }
-
-  if (isZonePoi(poi)) {
-    return (
-      candle.high >
-        poi.high &&
-      candle.close <=
-        poi.high &&
-      candle.close >=
-        poi.low -
-          volatility * 0.1
+      )
     );
   }
 
   return (
-    candle.high >
-      poi.level &&
-    candle.close <
-      poi.level
+    candle.close <=
+      poi.high &&
+    (
+      !isZonePoi(poi) ||
+      candle.close >=
+        poi.low -
+          volatility * 0.1
+    )
   );
 }
 
 function cleanSweep(
   poi: Poi,
-  candle: Candle,
+  sweepExtreme: number,
+  returnCandle: Candle,
   volatility: number
 ) {
   const boundary =
@@ -1256,16 +1257,16 @@ function cleanSweep(
   const penetration =
     poi.direction === "BUY"
       ? boundary -
-        candle.low
-      : candle.high -
+        sweepExtreme
+      : sweepExtreme -
         boundary;
 
   const returnedInside =
     poi.direction === "BUY"
-      ? candle.close >=
+      ? returnCandle.close >=
         boundary +
           volatility * 0.05
-      : candle.close <=
+      : returnCandle.close <=
         boundary -
           volatility * 0.05;
 
@@ -1296,6 +1297,20 @@ function targetPrice(
   return poi.level;
 }
 
+function liquidityTakenByCandle(
+  poi: Poi,
+  candle: Candle
+) {
+  const price =
+    targetPrice(poi);
+
+  return (
+    poi.direction === "BUY"
+      ? candle.low <= price
+      : candle.high >= price
+  );
+}
+
 function findQualifiedTarget(
   direction: Direction,
   entry: number,
@@ -1311,65 +1326,61 @@ function findQualifiedTarget(
 ): TargetSearchResult {
   const candidates =
     pois
-      .filter(
-        (poi) => {
-          if (
+      .filter((poi) => {
+        if (
+          poi.createdTime >
+            entryTime ||
+          poi.direction ===
+            direction ||
+          unavailablePoiIds.has(
+            poi.id
+          )
+        ) {
+          return false;
+        }
+
+        if (
+          entryTime -
             poi.createdTime >
-              entryTime ||
-            poi.direction ===
-              direction ||
-            unavailablePoiIds.has(
-              poi.id
-            )
-          ) {
-            return false;
-          }
+          POI_EXPIRY_DAYS *
+            24 *
+            H1_MS
+        ) {
+          return false;
+        }
 
-          if (
-            entryTime -
-              poi.createdTime >
-            POI_EXPIRY_DAYS *
-              24 *
-              H1_MS
-          ) {
-            return false;
-          }
-
-          const startIndex =
-            Math.max(
-              sweepM15Index,
-              firstIndexAtOrAfter(
-                data.m15,
-                poi.createdTime
-              ) - 1
-            );
-
-          return (
-            !poiInvalidatedBetween(
-              poi,
-              data,
-              atrM15,
-              startIndex,
-              entryTime
-            )
+        const startIndex =
+          Math.max(
+            sweepM15Index,
+            firstIndexAtOrAfter(
+              data.m15,
+              poi.createdTime
+            ) - 1
           );
-        }
-      )
-      .map(
-        (poi) => {
-          const price =
-            targetPrice(poi);
 
-          return {
+        return (
+          !poiInvalidatedBetween(
             poi,
-            price,
-            targetR:
-              Math.abs(
-                price - entry
-              ) / risk,
-          };
-        }
-      )
+            data,
+            atrM15,
+            startIndex,
+            entryTime
+          )
+        );
+      })
+      .map((poi) => {
+        const price =
+          targetPrice(poi);
+
+        return {
+          poi,
+          price,
+          targetR:
+            Math.abs(
+              price - entry
+            ) / risk,
+        };
+      })
       .filter(
         ({ price }) =>
           direction === "BUY"
@@ -1476,8 +1487,10 @@ function rejected(
 
 function createSignalAfterSweep(
   poi: Poi,
-  sweep: Candle,
-  sweepM15Index: number,
+  returnCandle: Candle,
+  returnM15Index: number,
+  sweepStartTime: number,
+  initialSweepExtreme: number,
   data:
     ResearchMarketData,
   h1Bias:
@@ -1503,14 +1516,8 @@ function createSignalAfterSweep(
         : "BEARISH";
 
   const sweepClose =
-    sweep.time +
+    returnCandle.time +
     M15_MS;
-
-  const sweepStart =
-    firstIndexAtOrAfter(
-      data.m5,
-      sweep.time
-    );
 
   const mssStart =
     firstIndexAtOrAfter(
@@ -1518,11 +1525,7 @@ function createSignalAfterSweep(
       sweepClose
     );
 
-  if (
-    mssStart <= 0 ||
-    sweepStart >=
-      data.m5.length
-  ) {
+  if (mssStart <= 0) {
     return rejected(
       "NO_LOCKED_SWING"
     );
@@ -1542,12 +1545,12 @@ function createSignalAfterSweep(
     (
       direction === "BUY" &&
       lockedSwing <=
-        sweep.close
+        returnCandle.close
     ) ||
     (
       direction === "SELL" &&
       lockedSwing >=
-        sweep.close
+        returnCandle.close
     )
   ) {
     return rejected(
@@ -1556,23 +1559,7 @@ function createSignalAfterSweep(
   }
 
   let sweepExtreme =
-    direction === "BUY"
-      ? Number.POSITIVE_INFINITY
-      : Number.NEGATIVE_INFINITY;
-
-  for (
-    let index =
-      sweepStart;
-    index < mssStart;
-    index++
-  ) {
-    sweepExtreme =
-      updateExtreme(
-        direction,
-        sweepExtreme,
-        data.m5[index]
-      );
-  }
+    initialSweepExtreme;
 
   const mssEnd =
     Math.min(
@@ -1608,7 +1595,7 @@ function createSignalAfterSweep(
         poi,
         data,
         atrM15,
-        sweepM15Index,
+        returnM15Index,
         closeTime
       )
     ) {
@@ -1844,7 +1831,7 @@ function createSignalAfterSweep(
       unavailablePoiIds,
       data,
       atrM15,
-      sweepM15Index
+      returnM15Index
     );
 
   if (
@@ -1886,7 +1873,8 @@ function createSignalAfterSweep(
       cleanSweep:
         cleanSweep(
           poi,
-          sweep,
+          sweepExtreme,
+          returnCandle,
           atrM15Value
         ),
       clearMss,
@@ -1962,7 +1950,7 @@ function createSignalAfterSweep(
         poi,
         data,
         atrM15,
-        sweepM15Index,
+        returnM15Index,
         candleClose
       )
     ) {
@@ -2096,7 +2084,7 @@ function createSignalAfterSweep(
     return {
       signal: {
         strategy:
-          `LIQUIDITY_MSS_FVG_V5:${poi.kind}`,
+          `LIQUIDITY_MSS_FVG_V6:${poi.kind}`,
         direction,
         entryTime:
           candle.time,
@@ -2112,7 +2100,10 @@ function createSignalAfterSweep(
         poiLevel:
           poi.level,
         sweepTime:
-          sweep.time,
+          sweepStartTime,
+        sweepReturnTime:
+          returnCandle.time,
+        sweepExtreme,
         mssTime:
           data.m5[
             mssIndex
@@ -2201,6 +2192,31 @@ function incrementRejection(
   statistics[key]++;
 }
 
+function excursionExtreme(
+  poi: Poi,
+  candle: Candle
+) {
+  return (
+    poi.direction === "BUY"
+      ? candle.low
+      : candle.high
+  );
+}
+
+function updateExcursion(
+  excursion:
+    SweepExcursion,
+  candle: Candle
+) {
+  excursion.extreme =
+    updateExtreme(
+      excursion.poi
+        .direction,
+      excursion.extreme,
+      candle
+    );
+}
+
 export function createLiquidityMssFvgSignals(
   data: ResearchMarketData
 ): LiquidityDetectionResult {
@@ -2263,11 +2279,22 @@ export function createLiquidityMssFvgSignals(
   const sweptPois =
     new Set<string>();
 
+  const targetConsumedPois =
+    new Set<string>();
+
+  const activeExcursions =
+    new Map<
+      string,
+      SweepExcursion
+    >();
+
   const statistics:
     LiquidityDetectionResult[
       "statistics"
     ] = {
       pois: pois.length,
+      excursionsStarted: 0,
+      excursionsExpired: 0,
       sweeps: 0,
       mss: 0,
       fvg: 0,
@@ -2313,6 +2340,187 @@ export function createLiquidityMssFvgSignals(
       continue;
     }
 
+    const currentBias =
+      biasAt(
+        closeTime,
+        data.h1,
+        structureBias
+      );
+
+    const expectedDirection:
+      Direction | null =
+        currentBias ===
+          "BULLISH"
+          ? "BUY"
+          : currentBias ===
+              "BEARISH"
+            ? "SELL"
+            : null;
+
+    const returned:
+      SweepExcursion[] = [];
+
+    /*
+     * Met a jour les excursions deja ouvertes.
+     * Une excursion dispose de trois bougies M15,
+     * y compris la bougie du premier depassement.
+     */
+    for (
+      const [
+        poiId,
+        excursion,
+      ] of activeExcursions
+    ) {
+      updateExcursion(
+        excursion,
+        candle
+      );
+
+      if (
+        returnedInsideAfterSweep(
+          excursion.poi,
+          candle,
+          volatility
+        )
+      ) {
+        returned.push(
+          excursion
+        );
+
+        continue;
+      }
+
+      const bars =
+        index -
+        excursion.startIndex +
+        1;
+
+      if (
+        bars >=
+        SWEEP_RETURN_MAXIMUM_BARS
+      ) {
+        activeExcursions.delete(
+          poiId
+        );
+
+        sweptPois.add(
+          poiId
+        );
+
+        targetConsumedPois.add(
+          poiId
+        );
+
+        statistics
+          .excursionsExpired++;
+      }
+    }
+
+    /*
+     * Demarre une nouvelle excursion avant de
+     * tester l'invalidation par cloture. Ainsi,
+     * la premiere bougie qui depasse le niveau
+     * n'est pas rejetee trop tot.
+     */
+    if (
+      expectedDirection !==
+        null &&
+      insideTradingSession(
+        closeTime
+      )
+    ) {
+      const crossingCandidates =
+        pois
+          .filter(
+            (poi) =>
+              isEntryPoi(
+                poi
+              ) &&
+              poi.createdTime <
+                closeTime &&
+              poi.direction ===
+                expectedDirection &&
+              !usedPois.has(
+                poi.id
+              ) &&
+              !invalidPois.has(
+                poi.id
+              ) &&
+              !sweptPois.has(
+                poi.id
+              ) &&
+              !activeExcursions.has(
+                poi.id
+              ) &&
+              crossedPoiBoundary(
+                poi,
+                candle
+              )
+          )
+          .sort(
+            (left, right) =>
+              left.priority -
+                right.priority ||
+              Math.abs(
+                left.level -
+                  candle.close
+              ) -
+                Math.abs(
+                  right.level -
+                    candle.close
+                )
+          );
+
+      const selected =
+        crossingCandidates[0];
+
+      if (selected) {
+        const excursion:
+          SweepExcursion = {
+            poi: selected,
+            startIndex:
+              index,
+            startTime:
+              candle.time,
+            extreme:
+              excursionExtreme(
+                selected,
+                candle
+              ),
+          };
+
+        activeExcursions.set(
+          selected.id,
+          excursion
+        );
+
+        targetConsumedPois.add(
+          selected.id
+        );
+
+        statistics
+          .excursionsStarted++;
+
+        if (
+          returnedInsideAfterSweep(
+            selected,
+            candle,
+            volatility
+          )
+        ) {
+          returned.push(
+            excursion
+          );
+        }
+      }
+    }
+
+    /*
+     * Les POI actuellement en excursion ne sont
+     * pas invalides avant la fin du delai de
+     * retour. Les autres peuvent expirer ou etre
+     * invalides normalement.
+     */
     for (
       const poi of pois
     ) {
@@ -2326,6 +2534,9 @@ export function createLiquidityMssFvgSignals(
           poi.id
         ) ||
         sweptPois.has(
+          poi.id
+        ) ||
+        activeExcursions.has(
           poi.id
         )
       ) {
@@ -2363,100 +2574,102 @@ export function createLiquidityMssFvgSignals(
       }
     }
 
+    /*
+     * Une liquidite peut etre consommee comme
+     * cible tout en restant exploitable comme
+     * support ou resistance d'entree.
+     */
+    for (
+      const poi of pois
+    ) {
+      if (
+        poi.createdTime <
+          closeTime &&
+        liquidityTakenByCandle(
+          poi,
+          candle
+        )
+      ) {
+        targetConsumedPois.add(
+          poi.id
+        );
+      }
+    }
+
     if (
-      !insideTradingSession(
-        closeTime
-      )
+      returned.length === 0
     ) {
       continue;
     }
 
-    const currentBias =
-      biasAt(
-        closeTime,
-        data.h1,
-        structureBias
+    const uniqueReturned =
+      [
+        ...new Map(
+          returned.map(
+            (excursion) => [
+              excursion.poi.id,
+              excursion,
+            ]
+          )
+        ).values(),
+      ];
+
+    uniqueReturned.sort(
+      (left, right) =>
+        left.poi.priority -
+          right.poi.priority ||
+        Math.abs(
+          left.poi.level -
+            candle.close
+        ) -
+          Math.abs(
+            right.poi.level -
+              candle.close
+          )
+    );
+
+    /*
+     * Les POI revenus dans leur zone sont
+     * consideres balayes une seule fois.
+     */
+    for (
+      const excursion
+      of uniqueReturned
+    ) {
+      activeExcursions.delete(
+        excursion.poi.id
       );
 
-    if (
-      currentBias ===
-      "NEUTRAL"
-    ) {
-      continue;
+      sweptPois.add(
+        excursion.poi.id
+      );
     }
 
-    const direction:
-      Direction =
-        currentBias ===
-        "BULLISH"
-          ? "BUY"
-          : "SELL";
+    statistics.sweeps +=
+      uniqueReturned.length;
 
-    const candidates =
-      pois
-        .filter(
-          (poi) =>
-            isEntryPoi(
-              poi
-            ) &&
-            poi.createdTime <
-              closeTime &&
-            poi.direction ===
-              direction &&
-            !usedPois.has(
-              poi.id
-            ) &&
-            !invalidPois.has(
-              poi.id
-            ) &&
-            !sweptPois.has(
-              poi.id
-            ) &&
-            isSweep(
-              poi,
-              candle,
-              volatility
-            )
-        )
-        .sort(
-          (left, right) =>
-            left.priority -
-              right.priority ||
-            Math.abs(
-              left.level -
-                candle.close
-            ) -
-              Math.abs(
-                right.level -
-                  candle.close
-              )
-        );
-
-    const poi =
-      candidates[0];
-
-    if (!poi) {
-      continue;
-    }
-
-    statistics.sweeps++;
+    const excursion =
+      uniqueReturned[0];
 
     const unavailablePoiIds =
       new Set<string>([
         ...invalidPois,
         ...usedPois,
         ...sweptPois,
+        ...targetConsumedPois,
       ]);
 
     unavailablePoiIds.add(
-      poi.id
+      excursion.poi.id
     );
 
     const attempt =
       createSignalAfterSweep(
-        poi,
+        excursion.poi,
         candle,
         index,
+        excursion.startTime,
+        excursion.extreme,
         data,
         structureBias,
         m5Pivots,
@@ -2466,10 +2679,6 @@ export function createLiquidityMssFvgSignals(
         pois,
         unavailablePoiIds
       );
-
-    sweptPois.add(
-      poi.id
-    );
 
     if (
       attempt.reachedMss
@@ -2524,7 +2733,7 @@ export function createLiquidityMssFvgSignals(
     );
 
     usedPois.add(
-      poi.id
+      excursion.poi.id
     );
   }
 

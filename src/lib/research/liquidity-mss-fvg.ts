@@ -68,7 +68,20 @@ type AttemptRejection =
   | "INVALID_RISK"
   | "NO_TARGET"
   | "RR_TOO_LOW"
+  | "QUALITY_TOO_LOW"
   | "AMBIGUOUS_ENTRY_CANDLE";
+
+type AcceptanceType =
+  | "NORMAL_RR_2_PLUS"
+  | "EXCELLENT_RR_1_5_PLUS";
+
+type QualityChecks = {
+  cleanH1Structure: boolean;
+  majorPoi: boolean;
+  cleanSweep: boolean;
+  clearMss: boolean;
+  cleanFvg: boolean;
+};
 
 type AttemptResult = {
   signal: LiquiditySignal | null;
@@ -76,6 +89,18 @@ type AttemptResult = {
   reachedMss: boolean;
   reachedFvg: boolean;
   reachedRetest: boolean;
+  acceptanceType: AcceptanceType | null;
+};
+
+type TargetSelection = {
+  poi: Poi;
+  price: number;
+  targetR: number;
+};
+
+type TargetSearchResult = {
+  target: TargetSelection | null;
+  hadActiveCandidates: boolean;
 };
 
 export type LiquiditySignal =
@@ -88,7 +113,13 @@ export type LiquiditySignal =
     fvgTime: number;
     fvgLow: number;
     fvgHigh: number;
+    fvgEntryMode:
+      | "PROXIMAL_EDGE"
+      | "MIDPOINT_50";
     targetLiquidity: number;
+    targetPoiId: string;
+    acceptanceType: AcceptanceType;
+    qualityChecks: QualityChecks;
   };
 
 export type LiquidityDetectionResult = {
@@ -100,6 +131,8 @@ export type LiquidityDetectionResult = {
     fvg: number;
     fvgRetests: number;
     entries: number;
+    acceptedNormalRr: number;
+    acceptedExcellentRr: number;
     noLockedSwing: number;
     invalidatedBeforeMss: number;
     noMss: number;
@@ -112,6 +145,7 @@ export type LiquidityDetectionResult = {
     invalidRisk: number;
     noTarget: number;
     rejectedRr: number;
+    qualityRejected: number;
     ambiguousEntryCandle: number;
   };
 };
@@ -125,18 +159,30 @@ const M5_PIVOT_LEFT = 2;
 const M5_PIVOT_RIGHT = 2;
 
 const IMPULSE_BODY_ATR = 0.9;
-const MSS_BODY_ATR = 0.5;
+
+const BASE_MSS_BODY_ATR = 0.5;
+const EXCELLENT_MSS_BODY_ATR = 0.75;
+
+const CLEAN_FVG_MINIMUM_ATR = 0.1;
+const SMALL_FVG_MAXIMUM_ATR = 0.25;
 
 const MSS_MAXIMUM_BARS = 12;
-const FVG_MAXIMUM_BARS = 3;
+const FVG_MAXIMUM_BARS = 4;
 const FVG_RETEST_MAXIMUM_BARS = 12;
 
 const POI_EXPIRY_DAYS = 60;
-const MINIMUM_TARGET_R = 2;
+
+const NORMAL_MINIMUM_RR = 2;
+const EXCELLENT_MINIMUM_RR = 1.5;
 
 const SPREAD = 0.45;
 const SLIPPAGE = 0.05;
 const STOP_ATR_BUFFER = 0.1;
+
+const DECISIVE_CLOSE_BUFFER_ATR = 0.1;
+const ACCEPTANCE_BUFFER_ATR = 0.05;
+const LINE_ACCEPTANCE_ATR = 0.15;
+const ACCEPTANCE_CANDLES = 3;
 
 const londonFormatter =
   new Intl.DateTimeFormat(
@@ -153,8 +199,7 @@ const newYorkFormatter =
   new Intl.DateTimeFormat(
     "en-US",
     {
-      timeZone:
-        "America/New_York",
+      timeZone: "America/New_York",
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
@@ -163,8 +208,7 @@ const newYorkFormatter =
 
 function localMinutes(
   timestamp: number,
-  formatter:
-    Intl.DateTimeFormat
+  formatter: Intl.DateTimeFormat
 ) {
   const parts =
     formatter.formatToParts(
@@ -408,6 +452,41 @@ function biasAt(
     : "NEUTRAL";
 }
 
+function cleanH1StructureAt(
+  timestamp: number,
+  expected: Bias,
+  h1: Candle[],
+  structureBias: Bias[]
+) {
+  const index =
+    lastClosedIndex(
+      h1,
+      H1_MS,
+      timestamp
+    );
+
+  if (
+    index < 3 ||
+    expected === "NEUTRAL"
+  ) {
+    return false;
+  }
+
+  return (
+    structureBias[index] ===
+      expected &&
+    structureBias[
+      index - 1
+    ] === expected &&
+    structureBias[
+      index - 2
+    ] === expected &&
+    structureBias[
+      index - 3
+    ] === expected
+  );
+}
+
 function poiPriority(
   kind: PoiKind
 ) {
@@ -435,6 +514,12 @@ function poiPriority(
   }
 
   return 4;
+}
+
+function isMajorPoi(
+  poi: Poi
+) {
+  return poi.priority <= 3;
 }
 
 function buildDailyPois(
@@ -911,15 +996,152 @@ function isZonePoi(
 
 function invalidatedByClose(
   poi: Poi,
-  candle: Candle
+  candle: Candle,
+  volatility: number
 ) {
   return (
     poi.direction === "BUY"
       ? candle.close <
-        poi.low
+        poi.low -
+          volatility *
+            DECISIVE_CLOSE_BUFFER_ATR
       : candle.close >
-        poi.high
+        poi.high +
+          volatility *
+            DECISIVE_CLOSE_BUFFER_ATR
   );
+}
+
+function acceptedInsidePoi(
+  poi: Poi,
+  candle: Candle,
+  volatility: number
+) {
+  if (isZonePoi(poi)) {
+    return (
+      candle.close >=
+        poi.low -
+          volatility *
+            ACCEPTANCE_BUFFER_ATR &&
+      candle.close <=
+        poi.high +
+          volatility *
+            ACCEPTANCE_BUFFER_ATR
+    );
+  }
+
+  return (
+    Math.abs(
+      candle.close -
+        poi.level
+    ) <=
+    volatility *
+      LINE_ACCEPTANCE_ATR
+  );
+}
+
+function poiInvalidatedAtIndex(
+  poi: Poi,
+  candles: Candle[],
+  atrValues: NumberSeries,
+  index: number
+) {
+  const volatility =
+    atrValues[index];
+
+  if (
+    volatility === null
+  ) {
+    return false;
+  }
+
+  if (
+    invalidatedByClose(
+      poi,
+      candles[index],
+      volatility
+    )
+  ) {
+    return true;
+  }
+
+  let consecutive = 0;
+
+  for (
+    let itemIndex = index;
+    itemIndex >=
+      Math.max(
+        0,
+        index -
+          ACCEPTANCE_CANDLES +
+          1
+      );
+    itemIndex--
+  ) {
+    const itemAtr =
+      atrValues[
+        itemIndex
+      ];
+
+    if (
+      itemAtr !== null &&
+      acceptedInsidePoi(
+        poi,
+        candles[
+          itemIndex
+        ],
+        itemAtr
+      )
+    ) {
+      consecutive++;
+    } else {
+      break;
+    }
+  }
+
+  return (
+    consecutive >=
+    ACCEPTANCE_CANDLES
+  );
+}
+
+function poiInvalidatedBetween(
+  poi: Poi,
+  data:
+    ResearchMarketData,
+  atrM15: NumberSeries,
+  fromM15Index: number,
+  timestamp: number
+) {
+  const endIndex =
+    lastClosedIndex(
+      data.m15,
+      M15_MS,
+      timestamp
+    );
+
+  for (
+    let index =
+      Math.max(
+        0,
+        fromM15Index + 1
+      );
+    index <= endIndex;
+    index++
+  ) {
+    if (
+      poiInvalidatedAtIndex(
+        poi,
+        data.m15,
+        atrM15,
+        index
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isSweep(
@@ -958,7 +1180,7 @@ function isSweep(
         poi.high &&
       candle.close >=
         poi.low -
-        volatility * 0.1
+          volatility * 0.1
     );
   }
 
@@ -970,19 +1192,52 @@ function isSweep(
   );
 }
 
+function cleanSweep(
+  poi: Poi,
+  candle: Candle,
+  volatility: number
+) {
+  const boundary =
+    poi.direction === "BUY"
+      ? poi.low
+      : poi.high;
+
+  const penetration =
+    poi.direction === "BUY"
+      ? boundary -
+        candle.low
+      : candle.high -
+        boundary;
+
+  const returnedInside =
+    poi.direction === "BUY"
+      ? candle.close >=
+        boundary +
+          volatility * 0.05
+      : candle.close <=
+        boundary -
+          volatility * 0.05;
+
+  return (
+    penetration >=
+      volatility * 0.05 &&
+    penetration <=
+      volatility * 0.8 &&
+    returnedInside
+  );
+}
+
 function targetPrice(
   poi: Poi
 ) {
   if (
-    poi.kind ===
-    "SUPPLY"
+    poi.kind === "SUPPLY"
   ) {
     return poi.low;
   }
 
   if (
-    poi.kind ===
-    "DEMAND"
+    poi.kind === "DEMAND"
   ) {
     return poi.high;
   }
@@ -990,197 +1245,117 @@ function targetPrice(
   return poi.level;
 }
 
-function liquidityTakenByCandle(
-  poi: Poi,
-  candle: Candle
-) {
-  const price =
-    targetPrice(poi);
-
-  return (
-    poi.direction === "BUY"
-      ? candle.low <= price
-      : candle.high >= price
-  );
-}
-
-function poiConsumedBetween(
-  poi: Poi,
-  m5: Candle[],
-  fromTime: number,
-  toTime: number
-) {
-  const start =
-    firstIndexAtOrAfter(
-      m5,
-      fromTime
-    );
-
-  const end =
-    firstIndexAtOrAfter(
-      m5,
-      toTime
-    );
-
-  for (
-    let index = start;
-    index < end;
-    index++
-  ) {
-    if (
-      liquidityTakenByCandle(
-        poi,
-        m5[index]
-      )
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function poiInvalidatedBetween(
-  poi: Poi,
-  data:
-    ResearchMarketData,
-  fromM15Index: number,
-  timestamp: number
-) {
-  const endIndex =
-    lastClosedIndex(
-      data.m15,
-      M15_MS,
-      timestamp
-    );
-
-  for (
-    let index =
-      Math.max(
-        0,
-        fromM15Index + 1
-      );
-    index <= endIndex;
-    index++
-  ) {
-    if (
-      invalidatedByClose(
-        poi,
-        data.m15[index]
-      )
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function nearestTarget(
+function findQualifiedTarget(
   direction: Direction,
   entry: number,
+  risk: number,
   entryTime: number,
   pois: Poi[],
   unavailablePoiIds:
     ReadonlySet<string>,
   data:
     ResearchMarketData,
-  sweepM15Index: number,
-  consumptionStartTime:
-    number
-) {
+  atrM15: NumberSeries,
+  sweepM15Index: number
+): TargetSearchResult {
   const candidates =
     pois
-      .filter((poi) => {
-        if (
-          poi.createdTime >
-            entryTime ||
-          poi.direction ===
-            direction ||
-          unavailablePoiIds.has(
-            poi.id
-          )
-        ) {
-          return false;
-        }
-
-        if (
-          entryTime -
+      .filter(
+        (poi) => {
+          if (
             poi.createdTime >
-          POI_EXPIRY_DAYS *
-            24 *
-            H1_MS
-        ) {
-          return false;
-        }
+              entryTime ||
+            poi.direction ===
+              direction ||
+            unavailablePoiIds.has(
+              poi.id
+            )
+          ) {
+            return false;
+          }
 
-        const poiStartIndex =
-          Math.max(
-            sweepM15Index,
-            firstIndexAtOrAfter(
-              data.m15,
-              poi.createdTime
-            ) - 1
+          if (
+            entryTime -
+              poi.createdTime >
+            POI_EXPIRY_DAYS *
+              24 *
+              H1_MS
+          ) {
+            return false;
+          }
+
+          const startIndex =
+            Math.max(
+              sweepM15Index,
+              firstIndexAtOrAfter(
+                data.m15,
+                poi.createdTime
+              ) - 1
+            );
+
+          return (
+            !poiInvalidatedBetween(
+              poi,
+              data,
+              atrM15,
+              startIndex,
+              entryTime
+            )
           );
-
-        if (
-          poiInvalidatedBetween(
-            poi,
-            data,
-            poiStartIndex,
-            entryTime
-          )
-        ) {
-          return false;
         }
+      )
+      .map(
+        (poi) => {
+          const price =
+            targetPrice(poi);
 
-        const consumptionStart =
-          Math.max(
-            consumptionStartTime,
-            poi.createdTime
-          );
-
-        if (
-          poiConsumedBetween(
+          return {
             poi,
-            data.m5,
-            consumptionStart,
-            entryTime
-          )
-        ) {
-          return false;
+            price,
+            targetR:
+              Math.abs(
+                price - entry
+              ) / risk,
+          };
         }
-
-        return true;
-      })
-      .map((poi) => ({
-        poi,
-        price:
-          targetPrice(poi),
-      }))
+      )
       .filter(
         ({ price }) =>
           direction === "BUY"
             ? price > entry
             : price < entry
+      )
+      .sort(
+        (left, right) =>
+          direction === "BUY"
+            ? left.price -
+              right.price
+            : right.price -
+              left.price
       );
 
   if (
     candidates.length === 0
   ) {
-    return null;
+    return {
+      target: null,
+      hadActiveCandidates:
+        false,
+    };
   }
 
-  candidates.sort(
-    (left, right) =>
-      direction === "BUY"
-        ? left.price -
-          right.price
-        : right.price -
-          left.price
-  );
+  const target =
+    candidates.find(
+      (candidate) =>
+        candidate.targetR >=
+        EXCELLENT_MINIMUM_RR
+    ) || null;
 
-  return candidates[0];
+  return {
+    target,
+    hadActiveCandidates:
+      true,
+  };
 }
 
 function updateExtreme(
@@ -1244,6 +1419,7 @@ function rejected(
     reachedMss,
     reachedFvg,
     reachedRetest,
+    acceptanceType: null,
   };
 }
 
@@ -1253,8 +1429,12 @@ function createSignalAfterSweep(
   sweepM15Index: number,
   data:
     ResearchMarketData,
+  h1Bias:
+    Bias[],
   m5Pivots:
     PivotSeries,
+  atrM15:
+    NumberSeries,
   atrM5:
     NumberSeries,
   atrM15Value: number,
@@ -1264,6 +1444,12 @@ function createSignalAfterSweep(
 ): AttemptResult {
   const direction =
     poi.direction;
+
+  const expectedBias:
+    Bias =
+      direction === "BUY"
+        ? "BULLISH"
+        : "BEARISH";
 
   const sweepClose =
     sweep.time +
@@ -1345,6 +1531,7 @@ function createSignalAfterSweep(
     );
 
   let mssIndex = -1;
+  let clearMss = false;
 
   for (
     let index = mssStart;
@@ -1369,6 +1556,7 @@ function createSignalAfterSweep(
       poiInvalidatedBetween(
         poi,
         data,
+        atrM15,
         sweepM15Index,
         closeTime
       )
@@ -1401,7 +1589,7 @@ function createSignalAfterSweep(
         candle.open &&
       body >=
         volatility *
-          MSS_BODY_ATR;
+          BASE_MSS_BODY_ATR;
 
     const bearishMss =
       direction === "SELL" &&
@@ -1411,13 +1599,19 @@ function createSignalAfterSweep(
         candle.open &&
       body >=
         volatility *
-          MSS_BODY_ATR;
+          BASE_MSS_BODY_ATR;
 
     if (
       bullishMss ||
       bearishMss
     ) {
       mssIndex = index;
+
+      clearMss =
+        body >=
+        volatility *
+          EXCELLENT_MSS_BODY_ATR;
+
       break;
     }
   }
@@ -1510,18 +1704,47 @@ function createSignalAfterSweep(
     );
   }
 
-  const midpoint =
-    (
-      fvgLow +
-      fvgHigh
-    ) / 2;
+  const fvgAtr =
+    atrM5[fvgIndex] ??
+    mssAtr;
+
+  const fvgWidth =
+    fvgHigh -
+    fvgLow;
+
+  const cleanFvg =
+    fvgWidth >=
+    fvgAtr *
+      CLEAN_FVG_MINIMUM_ATR;
+
+  const smallFvg =
+    fvgWidth <=
+    fvgAtr *
+      SMALL_FVG_MAXIMUM_ATR;
+
+  const rawEntry =
+    smallFvg
+      ? direction === "BUY"
+        ? fvgHigh
+        : fvgLow
+      : (
+          fvgLow +
+          fvgHigh
+        ) / 2;
+
+  const fvgEntryMode:
+    "PROXIMAL_EDGE" |
+    "MIDPOINT_50" =
+      smallFvg
+        ? "PROXIMAL_EDGE"
+        : "MIDPOINT_50";
 
   const provisionalEntry =
     direction === "BUY"
-      ? midpoint +
+      ? rawEntry +
         SPREAD +
         SLIPPAGE
-      : midpoint -
+      : rawEntry -
         SLIPPAGE;
 
   if (
@@ -1557,10 +1780,11 @@ function createSignalAfterSweep(
     );
   }
 
-  const targetResult =
-    nearestTarget(
+  const targetSearch =
+    findQualifiedTarget(
       direction,
       provisionalEntry,
+      initialRisk,
       data.m5[
         fvgIndex
       ].time +
@@ -1568,12 +1792,13 @@ function createSignalAfterSweep(
       pois,
       unavailablePoiIds,
       data,
-      sweepM15Index,
-      sweep.time
+      atrM15,
+      sweepM15Index
     );
 
   if (
-    targetResult === null
+    !targetSearch
+      .hadActiveCandidates
   ) {
     return rejected(
       "NO_TARGET",
@@ -1582,22 +1807,65 @@ function createSignalAfterSweep(
     );
   }
 
-  const target =
-    targetResult.price;
-
-  const targetR =
-    Math.abs(
-      target -
-        provisionalEntry
-    ) /
-    initialRisk;
-
   if (
-    targetR <
-    MINIMUM_TARGET_R
+    targetSearch.target ===
+    null
   ) {
     return rejected(
       "RR_TOO_LOW",
+      true,
+      true
+    );
+  }
+
+  const target =
+    targetSearch.target;
+
+  const qualityChecks:
+    QualityChecks = {
+      cleanH1Structure:
+        cleanH1StructureAt(
+          sweepClose,
+          expectedBias,
+          data.h1,
+          h1Bias
+        ),
+      majorPoi:
+        isMajorPoi(poi),
+      cleanSweep:
+        cleanSweep(
+          poi,
+          sweep,
+          atrM15Value
+        ),
+      clearMss,
+      cleanFvg,
+    };
+
+  const excellent =
+    Object.values(
+      qualityChecks
+    ).every(Boolean);
+
+  let acceptanceType:
+    AcceptanceType;
+
+  if (
+    target.targetR >=
+    NORMAL_MINIMUM_RR
+  ) {
+    acceptanceType =
+      "NORMAL_RR_2_PLUS";
+  } else if (
+    target.targetR >=
+      EXCELLENT_MINIMUM_RR &&
+    excellent
+  ) {
+    acceptanceType =
+      "EXCELLENT_RR_1_5_PLUS";
+  } else {
+    return rejected(
+      "QUALITY_TOO_LOW",
       true,
       true
     );
@@ -1642,6 +1910,7 @@ function createSignalAfterSweep(
       poiInvalidatedBetween(
         poi,
         data,
+        atrM15,
         sweepM15Index,
         candleClose
       )
@@ -1656,9 +1925,9 @@ function createSignalAfterSweep(
     const touched =
       direction === "BUY"
         ? candle.low <=
-          midpoint
+          rawEntry
         : candle.high >=
-          midpoint;
+          rawEntry;
 
     const stopTouched =
       stopWasTouched(
@@ -1671,7 +1940,7 @@ function createSignalAfterSweep(
       targetWasTouched(
         direction,
         candle,
-        target
+        target.price
       );
 
     if (!touched) {
@@ -1744,12 +2013,13 @@ function createSignalAfterSweep(
 
     const finalTargetR =
       Math.abs(
-        target - entry
+        target.price -
+          entry
       ) / risk;
 
     if (
       finalTargetR <
-      MINIMUM_TARGET_R
+      EXCELLENT_MINIMUM_RR
     ) {
       return rejected(
         "RR_TOO_LOW",
@@ -1759,10 +2029,23 @@ function createSignalAfterSweep(
       );
     }
 
+    if (
+      finalTargetR <
+        NORMAL_MINIMUM_RR &&
+      !excellent
+    ) {
+      return rejected(
+        "QUALITY_TOO_LOW",
+        true,
+        true,
+        true
+      );
+    }
+
     return {
       signal: {
         strategy:
-          `LIQUIDITY_MSS_FVG_V3:${poi.kind}`,
+          `LIQUIDITY_MSS_FVG_V4:${poi.kind}`,
         direction,
         entryTime:
           candle.time,
@@ -1789,13 +2072,19 @@ function createSignalAfterSweep(
           ].time,
         fvgLow,
         fvgHigh,
+        fvgEntryMode,
         targetLiquidity:
-          target,
+          target.price,
+        targetPoiId:
+          target.poi.id,
+        acceptanceType,
+        qualityChecks,
       },
       rejection: null,
       reachedMss: true,
       reachedFvg: true,
       reachedRetest: true,
+      acceptanceType,
     };
   }
 
@@ -1849,6 +2138,8 @@ function incrementRejection(
         "noTarget",
       RR_TOO_LOW:
         "rejectedRr",
+      QUALITY_TOO_LOW:
+        "qualityRejected",
       AMBIGUOUS_ENTRY_CANDLE:
         "ambiguousEntryCandle",
     };
@@ -1918,7 +2209,7 @@ export function createLiquidityMssFvgSignals(
   const invalidPois =
     new Set<string>();
 
-  const consumedPois =
+  const sweptPois =
     new Set<string>();
 
   const statistics:
@@ -1931,6 +2222,8 @@ export function createLiquidityMssFvgSignals(
       fvg: 0,
       fvgRetests: 0,
       entries: 0,
+      acceptedNormalRr: 0,
+      acceptedExcellentRr: 0,
       noLockedSwing: 0,
       invalidatedBeforeMss: 0,
       noMss: 0,
@@ -1943,6 +2236,7 @@ export function createLiquidityMssFvgSignals(
       invalidRisk: 0,
       noTarget: 0,
       rejectedRr: 0,
+      qualityRejected: 0,
       ambiguousEntryCandle: 0,
     };
 
@@ -1968,40 +2262,6 @@ export function createLiquidityMssFvgSignals(
       continue;
     }
 
-    if (index > 20) {
-      const previousCandle =
-        data.m15[
-          index - 1
-        ];
-
-      const previousClose =
-        previousCandle.time +
-        M15_MS;
-
-      for (
-        const poi of pois
-      ) {
-        if (
-          poi.createdTime <
-            previousClose &&
-          !usedPois.has(
-            poi.id
-          ) &&
-          !invalidPois.has(
-            poi.id
-          ) &&
-          liquidityTakenByCandle(
-            poi,
-            previousCandle
-          )
-        ) {
-          consumedPois.add(
-            poi.id
-          );
-        }
-      }
-    }
-
     for (
       const poi of pois
     ) {
@@ -2012,6 +2272,9 @@ export function createLiquidityMssFvgSignals(
           poi.id
         ) ||
         invalidPois.has(
+          poi.id
+        ) ||
+        sweptPois.has(
           poi.id
         )
       ) {
@@ -2036,9 +2299,11 @@ export function createLiquidityMssFvgSignals(
       }
 
       if (
-        invalidatedByClose(
+        poiInvalidatedAtIndex(
           poi,
-          candle
+          data.m15,
+          atrM15,
+          index
         )
       ) {
         invalidPois.add(
@@ -2055,7 +2320,7 @@ export function createLiquidityMssFvgSignals(
       continue;
     }
 
-    const bias =
+    const currentBias =
       biasAt(
         closeTime,
         data.h1,
@@ -2063,14 +2328,16 @@ export function createLiquidityMssFvgSignals(
       );
 
     if (
-      bias === "NEUTRAL"
+      currentBias ===
+      "NEUTRAL"
     ) {
       continue;
     }
 
     const direction:
       Direction =
-        bias === "BULLISH"
+        currentBias ===
+        "BULLISH"
           ? "BUY"
           : "SELL";
 
@@ -2088,7 +2355,7 @@ export function createLiquidityMssFvgSignals(
             !invalidPois.has(
               poi.id
             ) &&
-            !consumedPois.has(
+            !sweptPois.has(
               poi.id
             ) &&
             isSweep(
@@ -2124,8 +2391,12 @@ export function createLiquidityMssFvgSignals(
       new Set<string>([
         ...invalidPois,
         ...usedPois,
-        ...consumedPois,
+        ...sweptPois,
       ]);
+
+    unavailablePoiIds.add(
+      poi.id
+    );
 
     const attempt =
       createSignalAfterSweep(
@@ -2133,14 +2404,16 @@ export function createLiquidityMssFvgSignals(
         candle,
         index,
         data,
+        structureBias,
         m5Pivots,
+        atrM15,
         atrM5,
         volatility,
         pois,
         unavailablePoiIds
       );
 
-    consumedPois.add(
+    sweptPois.add(
       poi.id
     );
 
@@ -2168,11 +2441,29 @@ export function createLiquidityMssFvgSignals(
       attempt.rejection
     );
 
-    if (!attempt.signal) {
+    if (
+      !attempt.signal
+    ) {
       continue;
     }
 
     statistics.entries++;
+
+    if (
+      attempt.acceptanceType ===
+      "NORMAL_RR_2_PLUS"
+    ) {
+      statistics
+        .acceptedNormalRr++;
+    }
+
+    if (
+      attempt.acceptanceType ===
+      "EXCELLENT_RR_1_5_PLUS"
+    ) {
+      statistics
+        .acceptedExcellentRr++;
+    }
 
     signals.push(
       attempt.signal

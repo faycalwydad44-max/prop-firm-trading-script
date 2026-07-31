@@ -4,6 +4,7 @@ import { pool } from "@/db";
 export const dynamic = "force-dynamic";
 
 const ALLOWED_TIMEFRAMES = new Set([
+  "M1",
   "M5",
   "M15",
   "H1",

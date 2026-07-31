@@ -16,10 +16,7 @@ import {
   ResearchSignal,
 } from "./simulator";
 
-type Bias =
-  | "BULLISH"
-  | "BEARISH"
-  | "NEUTRAL";
+type Bias = "BULLISH" | "BEARISH" | "NEUTRAL";
 
 type PoiKind =
   | "PREVIOUS_DAY_HIGH"
@@ -55,6 +52,29 @@ type Poi = {
   priority: number;
 };
 
+type AttemptRejection =
+  | "NO_LOCKED_SWING"
+  | "POI_INVALIDATED_BEFORE_MSS"
+  | "NO_MSS"
+  | "NO_FVG"
+  | "POI_INVALIDATED_BEFORE_ENTRY"
+  | "STOP_TOUCHED_BEFORE_ENTRY"
+  | "TARGET_TOUCHED_BEFORE_ENTRY"
+  | "NO_FVG_RETEST"
+  | "INVALID_STOP_SIDE"
+  | "INVALID_RISK"
+  | "NO_TARGET"
+  | "RR_TOO_LOW"
+  | "AMBIGUOUS_ENTRY_CANDLE";
+
+type AttemptResult = {
+  signal: LiquiditySignal | null;
+  rejection: AttemptRejection | null;
+  reachedMss: boolean;
+  reachedFvg: boolean;
+  reachedRetest: boolean;
+};
+
 export type LiquiditySignal = ResearchSignal & {
   poiId: string;
   poiKind: PoiKind;
@@ -74,8 +94,21 @@ export type LiquidityDetectionResult = {
     sweeps: number;
     mss: number;
     fvg: number;
+    fvgRetests: number;
     entries: number;
-    rejectedNoTarget: number;
+    noLockedSwing: number;
+    invalidatedBeforeMss: number;
+    noMss: number;
+    noFvg: number;
+    invalidatedBeforeEntry: number;
+    stopTouchedBeforeEntry: number;
+    targetTouchedBeforeEntry: number;
+    noFvgRetest: number;
+    invalidStopSide: number;
+    invalidRisk: number;
+    noTarget: number;
+    rejectedRr: number;
+    ambiguousEntryCandle: number;
   };
 };
 
@@ -91,7 +124,7 @@ const IMPULSE_BODY_ATR = 0.9;
 const MSS_BODY_ATR = 0.5;
 
 const MSS_MAXIMUM_BARS = 12;
-const FVG_MAXIMUM_BARS = 6;
+const FVG_MAXIMUM_BARS = 3;
 const FVG_RETEST_MAXIMUM_BARS = 12;
 
 const POI_EXPIRY_DAYS = 60;
@@ -102,26 +135,20 @@ const SLIPPAGE = 0.05;
 const STOP_ATR_BUFFER = 0.1;
 
 const londonFormatter =
-  new Intl.DateTimeFormat(
-    "en-GB",
-    {
-      timeZone: "Europe/London",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }
-  );
+  new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 
 const newYorkFormatter =
-  new Intl.DateTimeFormat(
-    "en-US",
-    {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }
-  );
+  new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 
 function localMinutes(
   timestamp: number,
@@ -159,17 +186,11 @@ function insideTradingSession(
     newYorkFormatter
   );
 
-  const londonSession =
-    london >= 8 * 60 &&
-    london <= 12 * 60;
-
-  const newYorkSession =
-    newYork >= 8 * 60 + 30 &&
-    newYork <= 12 * 60;
-
   return (
-    londonSession ||
-    newYorkSession
+    (london >= 8 * 60 &&
+      london <= 12 * 60) ||
+    (newYork >= 8 * 60 + 30 &&
+      newYork <= 12 * 60)
   );
 }
 
@@ -201,11 +222,8 @@ function confirmedPivots(
 
   const pivots: Pivot[] = [];
 
-  let latestHigh: number | null =
-    null;
-
-  let latestLow: number | null =
-    null;
+  let latestHigh: number | null = null;
+  let latestLow: number | null = null;
 
   for (
     let confirmedAt = 0;
@@ -220,10 +238,8 @@ function confirmedPivots(
       let isLow = true;
 
       for (
-        let index =
-          pivotIndex - left;
-        index <=
-          pivotIndex + right;
+        let index = pivotIndex - left;
+        index <= pivotIndex + right;
         index++
       ) {
         if (index === pivotIndex) {
@@ -274,11 +290,8 @@ function confirmedPivots(
       }
     }
 
-    high[confirmedAt] =
-      latestHigh;
-
-    low[confirmedAt] =
-      latestLow;
+    high[confirmedAt] = latestHigh;
+    low[confirmedAt] = latestLow;
   }
 
   return {
@@ -297,8 +310,7 @@ function buildStructureBias(
       "NEUTRAL"
     );
 
-  let current: Bias =
-    "NEUTRAL";
+  let current: Bias = "NEUTRAL";
 
   for (
     let index = 1;
@@ -351,10 +363,8 @@ function poiPriority(
   kind: PoiKind
 ) {
   if (
-    kind ===
-      "PREVIOUS_DAY_HIGH" ||
-    kind ===
-      "PREVIOUS_DAY_LOW"
+    kind === "PREVIOUS_DAY_HIGH" ||
+    kind === "PREVIOUS_DAY_LOW"
   ) {
     return 1;
   }
@@ -433,35 +443,25 @@ function buildDailyPois(
     );
 
     pois.push({
-      id:
-        `PDH:${previousDay}`,
-      kind:
-        "PREVIOUS_DAY_HIGH",
+      id: `PDH:${previousDay}`,
+      kind: "PREVIOUS_DAY_HIGH",
       direction: "SELL",
       low: high,
       high,
       level: high,
       createdTime: currentDay,
-      priority:
-        poiPriority(
-          "PREVIOUS_DAY_HIGH"
-        ),
+      priority: 1,
     });
 
     pois.push({
-      id:
-        `PDL:${previousDay}`,
-      kind:
-        "PREVIOUS_DAY_LOW",
+      id: `PDL:${previousDay}`,
+      kind: "PREVIOUS_DAY_LOW",
       direction: "BUY",
       low,
       high: low,
       level: low,
       createdTime: currentDay,
-      priority:
-        poiPriority(
-          "PREVIOUS_DAY_LOW"
-        ),
+      priority: 1,
     });
   }
 
@@ -473,13 +473,6 @@ function buildSwingPois(
 ) {
   return pivots.pivots.map(
     (pivot): Poi => {
-      const high =
-        pivot.kind === "HIGH"
-          ? pivot.price
-          : pivot.price;
-
-      const low = high;
-
       const kind: PoiKind =
         pivot.kind === "HIGH"
           ? "SWING_HIGH"
@@ -493,8 +486,8 @@ function buildSwingPois(
           pivot.kind === "HIGH"
             ? "SELL"
             : "BUY",
-        low,
-        high,
+        low: pivot.price,
+        high: pivot.price,
         level: pivot.price,
         createdTime:
           pivot.confirmationTime,
@@ -510,38 +503,35 @@ function buildEqualPois(
 ) {
   const output: Poi[] = [];
 
-  const groups = {
-    HIGH: pivots.pivots.filter(
-      (pivot) =>
-        pivot.kind === "HIGH"
-    ),
-    LOW: pivots.pivots.filter(
-      (pivot) =>
-        pivot.kind === "LOW"
-    ),
-  };
-
   for (
-    const kind
-    of ["HIGH", "LOW"] as const
+    const kind of [
+      "HIGH",
+      "LOW",
+    ] as const
   ) {
-    const items = groups[kind];
+    const items =
+      pivots.pivots.filter(
+        (pivot) =>
+          pivot.kind === kind
+      );
 
     for (
       let index = 1;
       index < items.length;
       index++
     ) {
-      const current = items[index];
-
-      const previousCandidates =
-        items.slice(
-          Math.max(0, index - 8),
-          index
-        );
+      const current =
+        items[index];
 
       const previous =
-        previousCandidates
+        items
+          .slice(
+            Math.max(
+              0,
+              index - 8
+            ),
+            index
+          )
           .filter(
             (candidate) =>
               current.index -
@@ -594,8 +584,7 @@ function buildEqualPois(
         level,
         createdTime:
           current.confirmationTime,
-        priority:
-          poiPriority(poiKind),
+        priority: 3,
       });
     }
   }
@@ -642,7 +631,7 @@ function buildSupplyDemandPois(
   atrH1: NumberSeries
 ) {
   const output: Poi[] = [];
-  const bosKeys =
+  const usedBos =
     new Set<string>();
 
   for (
@@ -659,21 +648,16 @@ function buildSupplyDemandPois(
     const previousLow =
       pivots.low[index - 1];
 
-    if (
-      volatility === null ||
-      (
-        previousHigh === null &&
-        previousLow === null
-      )
-    ) {
+    if (volatility === null) {
       continue;
     }
 
-    const candle = h1[index];
+    const candle =
+      h1[index];
 
     const body = Math.abs(
       candle.close -
-      candle.open
+        candle.open
     );
 
     if (
@@ -716,10 +700,10 @@ function buildSupplyDemandPois(
         ? previousHigh
         : previousLow;
 
-    const bosKey =
+    const key =
       `${direction}:${bosLevel}`;
 
-    if (bosKeys.has(bosKey)) {
+    if (usedBos.has(key)) {
       continue;
     }
 
@@ -734,7 +718,7 @@ function buildSupplyDemandPois(
       continue;
     }
 
-    bosKeys.add(bosKey);
+    usedBos.add(key);
 
     const kind: PoiKind =
       direction === "BUY"
@@ -744,17 +728,11 @@ function buildSupplyDemandPois(
     const low =
       direction === "BUY"
         ? source.low
-        : Math.min(
-            source.open,
-            source.high
-          );
+        : source.open;
 
     const high =
       direction === "BUY"
-        ? Math.max(
-            source.open,
-            source.low
-          )
+        ? source.open
         : source.high;
 
     if (
@@ -778,8 +756,7 @@ function buildSupplyDemandPois(
           : high,
       createdTime:
         candle.time + H1_MS,
-      priority:
-        poiPriority(kind),
+      priority: 2,
     });
   }
 
@@ -788,30 +765,30 @@ function buildSupplyDemandPois(
 
 function buildPois(
   data: ResearchMarketData,
-  h1Pivots: PivotSeries,
+  pivots: PivotSeries,
   atrH1: NumberSeries
 ) {
-  const combined = [
+  const all = [
     ...buildDailyPois(
       data.h1
     ),
     ...buildSupplyDemandPois(
       data.h1,
-      h1Pivots,
+      pivots,
       atrH1
     ),
     ...buildEqualPois(
-      h1Pivots
+      pivots
     ),
     ...buildSwingPois(
-      h1Pivots
+      pivots
     ),
   ];
 
   const unique =
     new Map<string, Poi>();
 
-  for (const poi of combined) {
+  for (const poi of all) {
     unique.set(
       poi.id,
       poi
@@ -836,19 +813,25 @@ function isZonePoi(
   );
 }
 
+function invalidatedByClose(
+  poi: Poi,
+  candle: Candle
+) {
+  return poi.direction === "BUY"
+    ? candle.close < poi.low
+    : candle.close > poi.high;
+}
+
 function isSweep(
   poi: Poi,
   candle: Candle,
   volatility: number
 ) {
-  if (
-    poi.direction === "BUY"
-  ) {
+  if (poi.direction === "BUY") {
     if (isZonePoi(poi)) {
       return (
         candle.low < poi.low &&
-        candle.close >=
-          poi.low &&
+        candle.close >= poi.low &&
         candle.close <=
           poi.high +
             volatility * 0.1
@@ -857,16 +840,14 @@ function isSweep(
 
     return (
       candle.low < poi.level &&
-      candle.close >
-        poi.level
+      candle.close > poi.level
     );
   }
 
   if (isZonePoi(poi)) {
     return (
       candle.high > poi.high &&
-      candle.close <=
-        poi.high &&
+      candle.close <= poi.high &&
       candle.close >=
         poi.low -
           volatility * 0.1
@@ -875,24 +856,26 @@ function isSweep(
 
   return (
     candle.high > poi.level &&
-    candle.close <
-      poi.level
+    candle.close < poi.level
   );
 }
 
-function poiTargetPrice(
-  poi: Poi,
-  direction: Direction
+function targetPrice(
+  poi: Poi
 ) {
-  if (direction === "BUY") {
-    return isZonePoi(poi)
-      ? poi.low
-      : poi.level;
+  if (
+    poi.kind === "SUPPLY"
+  ) {
+    return poi.low;
   }
 
-  return isZonePoi(poi)
-    ? poi.high
-    : poi.level;
+  if (
+    poi.kind === "DEMAND"
+  ) {
+    return poi.high;
+  }
+
+  return poi.level;
 }
 
 function nearestTarget(
@@ -909,13 +892,7 @@ function nearestTarget(
         poi.direction !==
           direction
     )
-    .map(
-      (poi) =>
-        poiTargetPrice(
-          poi,
-          direction
-        )
-    )
+    .map(targetPrice)
     .filter(
       (price) =>
         direction === "BUY"
@@ -932,81 +909,115 @@ function nearestTarget(
     : Math.max(...prices);
 }
 
-function findSweepExtremeIndex(
-  m5: Candle[],
-  sweep: Candle,
-  direction: Direction
+function poiInvalidatedBetween(
+  poi: Poi,
+  data: ResearchMarketData,
+  sweepM15Index: number,
+  timestamp: number
 ) {
-  const start =
-    firstIndexAtOrAfter(
-      m5,
-      sweep.time
+  const endIndex =
+    lastClosedIndex(
+      data.m15,
+      M15_MS,
+      timestamp
     );
-
-  const end =
-    firstIndexAtOrAfter(
-      m5,
-      sweep.time +
-        M15_MS
-    );
-
-  if (start >= end) {
-    return start;
-  }
-
-  let result = start;
 
   for (
-    let index = start + 1;
-    index < end;
+    let index =
+      sweepM15Index + 1;
+    index <= endIndex;
     index++
   ) {
     if (
-      direction === "BUY" &&
-      m5[index].low <
-        m5[result].low
+      invalidatedByClose(
+        poi,
+        data.m15[index]
+      )
     ) {
-      result = index;
-    }
-
-    if (
-      direction === "SELL" &&
-      m5[index].high >
-        m5[result].high
-    ) {
-      result = index;
+      return true;
     }
   }
 
-  return result;
+  return false;
+}
+
+function updateExtreme(
+  direction: Direction,
+  current: number,
+  candle: Candle
+) {
+  return direction === "BUY"
+    ? Math.min(
+        current,
+        candle.low
+      )
+    : Math.max(
+        current,
+        candle.high
+      );
+}
+
+function stopWasTouched(
+  direction: Direction,
+  candle: Candle,
+  stopLoss: number
+) {
+  return direction === "BUY"
+    ? candle.low <= stopLoss
+    : candle.high +
+        SPREAD >=
+      stopLoss;
+}
+
+function targetWasTouched(
+  direction: Direction,
+  candle: Candle,
+  target: number
+) {
+  return direction === "BUY"
+    ? candle.high >= target
+    : candle.low +
+        SPREAD <=
+      target;
+}
+
+function rejected(
+  rejection:
+    AttemptRejection,
+  reachedMss = false,
+  reachedFvg = false,
+  reachedRetest = false
+): AttemptResult {
+  return {
+    signal: null,
+    rejection,
+    reachedMss,
+    reachedFvg,
+    reachedRetest,
+  };
 }
 
 function createSignalAfterSweep(
   poi: Poi,
   sweep: Candle,
+  sweepM15Index: number,
   data: ResearchMarketData,
   m5Pivots: PivotSeries,
   atrM5: NumberSeries,
   atrM15Value: number,
   pois: Poi[]
-): LiquiditySignal | null {
+): AttemptResult {
   const direction =
     poi.direction;
 
   const sweepClose =
     sweep.time + M15_MS;
 
-  const sweepExtremeIndex =
-    findSweepExtremeIndex(
+  const sweepStart =
+    firstIndexAtOrAfter(
       data.m5,
-      sweep,
-      direction
+      sweep.time
     );
-
-  const sweepExtreme =
-    data.m5[
-      sweepExtremeIndex
-    ];
 
   const mssStart =
     firstIndexAtOrAfter(
@@ -1014,12 +1025,66 @@ function createSignalAfterSweep(
       sweepClose
     );
 
-  const mssEnd =
-    Math.min(
-      data.m5.length,
-      mssStart +
-        MSS_MAXIMUM_BARS
+  if (
+    mssStart <= 0 ||
+    sweepStart >=
+      data.m5.length
+  ) {
+    return rejected(
+      "NO_LOCKED_SWING"
     );
+  }
+
+  const lockedSwing =
+    direction === "BUY"
+      ? m5Pivots.high[
+          mssStart - 1
+        ]
+      : m5Pivots.low[
+          mssStart - 1
+        ];
+
+  if (
+    lockedSwing === null ||
+    (
+      direction === "BUY" &&
+      lockedSwing <=
+        sweep.close
+    ) ||
+    (
+      direction === "SELL" &&
+      lockedSwing >=
+        sweep.close
+    )
+  ) {
+    return rejected(
+      "NO_LOCKED_SWING"
+    );
+  }
+
+  let sweepExtreme =
+    direction === "BUY"
+      ? Number.POSITIVE_INFINITY
+      : Number.NEGATIVE_INFINITY;
+
+  for (
+    let index = sweepStart;
+    index < mssStart;
+    index++
+  ) {
+    sweepExtreme =
+      updateExtreme(
+        direction,
+        sweepExtreme,
+        data.m5[index]
+      );
+  }
+
+  const mssEnd = Math.min(
+    data.m5.length,
+    mssStart +
+      MSS_MAXIMUM_BARS
+  );
 
   let mssIndex = -1;
 
@@ -1031,22 +1096,33 @@ function createSignalAfterSweep(
     const candle =
       data.m5[index];
 
+    const closeTime =
+      candle.time + M5_MS;
+
+    sweepExtreme =
+      updateExtreme(
+        direction,
+        sweepExtreme,
+        candle
+      );
+
+    if (
+      poiInvalidatedBetween(
+        poi,
+        data,
+        sweepM15Index,
+        closeTime
+      )
+    ) {
+      return rejected(
+        "POI_INVALIDATED_BEFORE_MSS"
+      );
+    }
+
     const volatility =
       atrM5[index];
 
-    const swingLevel =
-      direction === "BUY"
-        ? m5Pivots.high[
-            index - 1
-          ]
-        : m5Pivots.low[
-            index - 1
-          ];
-
-    if (
-      volatility === null ||
-      swingLevel === null
-    ) {
+    if (volatility === null) {
       continue;
     }
 
@@ -1058,7 +1134,7 @@ function createSignalAfterSweep(
     const bullishMss =
       direction === "BUY" &&
       candle.close >
-        swingLevel &&
+        lockedSwing &&
       candle.close >
         candle.open &&
       body >=
@@ -1068,7 +1144,7 @@ function createSignalAfterSweep(
     const bearishMss =
       direction === "SELL" &&
       candle.close <
-        swingLevel &&
+        lockedSwing &&
       candle.close <
         candle.open &&
       body >=
@@ -1085,16 +1161,36 @@ function createSignalAfterSweep(
   }
 
   if (mssIndex < 0) {
-    return null;
+    return rejected(
+      "NO_MSS"
+    );
   }
 
-  const fvgEnd =
-    Math.min(
-      data.m5.length,
-      mssIndex +
-        FVG_MAXIMUM_BARS +
-        1
-    );
+  const mssClose =
+    data.m5[mssIndex].time +
+    M5_MS;
+
+  const frozenStop =
+    direction === "BUY"
+      ? sweepExtreme -
+        (
+          atrM5[mssIndex] ??
+          atrM15Value
+        ) *
+          STOP_ATR_BUFFER
+      : sweepExtreme +
+        (
+          atrM5[mssIndex] ??
+          atrM15Value
+        ) *
+          STOP_ATR_BUFFER +
+        SPREAD;
+
+  const fvgEnd = Math.min(
+    data.m5.length,
+    mssIndex +
+      FVG_MAXIMUM_BARS
+  );
 
   let fvgIndex = -1;
   let fvgLow = 0;
@@ -1102,7 +1198,10 @@ function createSignalAfterSweep(
 
   for (
     let index =
-      Math.max(2, mssIndex);
+      Math.max(
+        2,
+        mssIndex
+      );
     index < fvgEnd;
     index++
   ) {
@@ -1138,52 +1237,138 @@ function createSignalAfterSweep(
   }
 
   if (fvgIndex < 0) {
-    return null;
+    return rejected(
+      "NO_FVG",
+      true
+    );
   }
 
   const midpoint =
     (fvgLow + fvgHigh) /
     2;
 
+  const provisionalEntry =
+    direction === "BUY"
+      ? midpoint +
+        SPREAD +
+        SLIPPAGE
+      : midpoint -
+        SLIPPAGE;
+
+  const target =
+    nearestTarget(
+      direction,
+      provisionalEntry,
+      data.m5[fvgIndex].time +
+        M5_MS,
+      pois
+    );
+
+  if (target === null) {
+    return rejected(
+      "NO_TARGET",
+      true,
+      true
+    );
+  }
+
+  const initialRisk =
+    Math.abs(
+      provisionalEntry -
+        frozenStop
+    );
+
+  if (
+    direction === "BUY"
+      ? frozenStop >=
+        provisionalEntry
+      : frozenStop <=
+        provisionalEntry
+  ) {
+    return rejected(
+      "INVALID_STOP_SIDE",
+      true,
+      true
+    );
+  }
+
+  if (
+    initialRisk <=
+      SPREAD * 1.5 ||
+    initialRisk >
+      atrM15Value * 3
+  ) {
+    return rejected(
+      "INVALID_RISK",
+      true,
+      true
+    );
+  }
+
+  const targetR =
+    Math.abs(
+      target -
+        provisionalEntry
+    ) /
+    initialRisk;
+
+  if (
+    targetR <
+    MINIMUM_TARGET_R
+  ) {
+    return rejected(
+      "RR_TOO_LOW",
+      true,
+      true
+    );
+  }
+
+  const retestStart =
+    fvgIndex + 1;
+
   const retestEnd =
     Math.min(
       data.m5.length,
-      fvgIndex +
-        FVG_RETEST_MAXIMUM_BARS +
-        1
+      retestStart +
+        FVG_RETEST_MAXIMUM_BARS
     );
 
-  const sweepAtr =
-    atrM5[
-      sweepExtremeIndex
-    ];
-
-  if (sweepAtr === null) {
-    return null;
-  }
-
   for (
-    let index =
-      fvgIndex + 1;
+    let index = retestStart;
     index < retestEnd;
     index++
   ) {
     const candle =
       data.m5[index];
 
-    const entryTime =
-      candle.time;
+    const candleClose =
+      candle.time + M5_MS;
 
     if (
       !sameUtcDay(
-        sweepClose,
-        entryTime
+        mssClose,
+        candleClose
       ) ||
       !insideTradingSession(
-        entryTime
+        candle.time
       )
     ) {
       break;
+    }
+
+    if (
+      poiInvalidatedBetween(
+        poi,
+        data,
+        sweepM15Index,
+        candleClose
+      )
+    ) {
+      return rejected(
+        "POI_INVALIDATED_BEFORE_ENTRY",
+        true,
+        true
+      );
     }
 
     const touched =
@@ -1193,31 +1378,71 @@ function createSignalAfterSweep(
         : candle.high >=
           midpoint;
 
+    const stopTouched =
+      stopWasTouched(
+        direction,
+        candle,
+        frozenStop
+      );
+
+    const targetTouched =
+      targetWasTouched(
+        direction,
+        candle,
+        target
+      );
+
     if (!touched) {
+      if (stopTouched) {
+        return rejected(
+          "STOP_TOUCHED_BEFORE_ENTRY",
+          true,
+          true
+        );
+      }
+
+      if (targetTouched) {
+        return rejected(
+          "TARGET_TOUCHED_BEFORE_ENTRY",
+          true,
+          true
+        );
+      }
+
       continue;
     }
 
-    const entry =
-      direction === "BUY"
-        ? midpoint +
-          SPREAD +
-          SLIPPAGE
-        : midpoint -
-          SLIPPAGE;
+    if (
+      stopTouched ||
+      targetTouched
+    ) {
+      return rejected(
+        "AMBIGUOUS_ENTRY_CANDLE",
+        true,
+        true,
+        true
+      );
+    }
 
-    const stopLoss =
-      direction === "BUY"
-        ? sweepExtreme.low -
-          sweepAtr *
-            STOP_ATR_BUFFER
-        : sweepExtreme.high +
-          sweepAtr *
-            STOP_ATR_BUFFER +
-          SPREAD;
+    const entry =
+      provisionalEntry;
 
     const risk = Math.abs(
-      entry - stopLoss
+      entry - frozenStop
     );
+
+    if (
+      direction === "BUY"
+        ? frozenStop >= entry
+        : frozenStop <= entry
+    ) {
+      return rejected(
+        "INVALID_STOP_SIDE",
+        true,
+        true,
+        true
+      );
+    }
 
     if (
       risk <=
@@ -1225,63 +1450,129 @@ function createSignalAfterSweep(
       risk >
         atrM15Value * 3
     ) {
-      return null;
-    }
-
-    const target =
-      nearestTarget(
-        direction,
-        entry,
-        entryTime,
-        pois
+      return rejected(
+        "INVALID_RISK",
+        true,
+        true,
+        true
       );
-
-    if (target === null) {
-      return null;
     }
 
-    const targetR =
+    const finalTargetR =
       Math.abs(
         target - entry
       ) / risk;
 
     if (
-      targetR <
+      finalTargetR <
       MINIMUM_TARGET_R
     ) {
-      return null;
+      return rejected(
+        "RR_TOO_LOW",
+        true,
+        true,
+        true
+      );
     }
 
     return {
-      strategy:
-        `LIQUIDITY_MSS_FVG:${poi.kind}`,
-      direction,
-      entryTime,
-      entry,
-      stopLoss,
-      targetR,
-      poiId: poi.id,
-      poiKind: poi.kind,
-      poiLevel:
-        poi.level,
-      sweepTime:
-        sweep.time,
-      mssTime:
-        data.m5[
-          mssIndex
-        ].time,
-      fvgTime:
-        data.m5[
-          fvgIndex
-        ].time,
-      fvgLow,
-      fvgHigh,
-      targetLiquidity:
-        target,
+      signal: {
+        strategy:
+          `LIQUIDITY_MSS_FVG_V2:${poi.kind}`,
+        direction,
+        entryTime:
+          candle.time,
+        entry,
+        stopLoss:
+          frozenStop,
+        targetR:
+          finalTargetR,
+        poiId:
+          poi.id,
+        poiKind:
+          poi.kind,
+        poiLevel:
+          poi.level,
+        sweepTime:
+          sweep.time,
+        mssTime:
+          data.m5[
+            mssIndex
+          ].time,
+        fvgTime:
+          data.m5[
+            fvgIndex
+          ].time,
+        fvgLow,
+        fvgHigh,
+        targetLiquidity:
+          target,
+      },
+      rejection: null,
+      reachedMss: true,
+      reachedFvg: true,
+      reachedRetest: true,
     };
   }
 
-  return null;
+  return rejected(
+    "NO_FVG_RETEST",
+    true,
+    true
+  );
+}
+
+function incrementRejection(
+  statistics:
+    LiquidityDetectionResult[
+      "statistics"
+    ],
+  rejection:
+    AttemptRejection | null
+) {
+  if (!rejection) {
+    return;
+  }
+
+  const mapping:
+    Record<
+      AttemptRejection,
+      keyof LiquidityDetectionResult[
+        "statistics"
+      ]
+    > = {
+      NO_LOCKED_SWING:
+        "noLockedSwing",
+      POI_INVALIDATED_BEFORE_MSS:
+        "invalidatedBeforeMss",
+      NO_MSS:
+        "noMss",
+      NO_FVG:
+        "noFvg",
+      POI_INVALIDATED_BEFORE_ENTRY:
+        "invalidatedBeforeEntry",
+      STOP_TOUCHED_BEFORE_ENTRY:
+        "stopTouchedBeforeEntry",
+      TARGET_TOUCHED_BEFORE_ENTRY:
+        "targetTouchedBeforeEntry",
+      NO_FVG_RETEST:
+        "noFvgRetest",
+      INVALID_STOP_SIDE:
+        "invalidStopSide",
+      INVALID_RISK:
+        "invalidRisk",
+      NO_TARGET:
+        "noTarget",
+      RR_TOO_LOW:
+        "rejectedRr",
+      AMBIGUOUS_ENTRY_CANDLE:
+        "ambiguousEntryCandle",
+    };
+
+  const key =
+    mapping[rejection];
+
+  statistics[key]++;
 }
 
 export function createLiquidityMssFvgSignals(
@@ -1343,10 +1634,30 @@ export function createLiquidityMssFvgSignals(
   const invalidPois =
     new Set<string>();
 
-  let sweeps = 0;
-  let mss = 0;
-  let fvg = 0;
-  let rejectedNoTarget = 0;
+  const statistics:
+    LiquidityDetectionResult[
+      "statistics"
+    ] = {
+      pois: pois.length,
+      sweeps: 0,
+      mss: 0,
+      fvg: 0,
+      fvgRetests: 0,
+      entries: 0,
+      noLockedSwing: 0,
+      invalidatedBeforeMss: 0,
+      noMss: 0,
+      noFvg: 0,
+      invalidatedBeforeEntry: 0,
+      stopTouchedBeforeEntry: 0,
+      targetTouchedBeforeEntry: 0,
+      noFvgRetest: 0,
+      invalidStopSide: 0,
+      invalidRisk: 0,
+      noTarget: 0,
+      rejectedRr: 0,
+      ambiguousEntryCandle: 0,
+    };
 
   for (
     let index = 20;
@@ -1360,29 +1671,10 @@ export function createLiquidityMssFvgSignals(
     const closeTime =
       candle.time + M15_MS;
 
-    if (
-      !insideTradingSession(
-        closeTime
-      )
-    ) {
-      continue;
-    }
-
     const volatility =
       atrM15[index];
 
     if (volatility === null) {
-      continue;
-    }
-
-    const bias =
-      biasAt(
-        closeTime,
-        data.h1,
-        structureBias
-      );
-
-    if (bias === "NEUTRAL") {
       continue;
     }
 
@@ -1417,38 +1709,38 @@ export function createLiquidityMssFvgSignals(
         continue;
       }
 
-      const expectedDirection:
-        Direction =
-          bias === "BULLISH"
-            ? "BUY"
-            : "SELL";
-
       if (
-        poi.direction !==
-        expectedDirection
+        invalidatedByClose(
+          poi,
+          candle
+        )
       ) {
-        continue;
-      }
-
-      const invalidated =
-        poi.direction === "BUY"
-          ? candle.close <
-            poi.low -
-              volatility * 0.1
-          : candle.close >
-            poi.high +
-              volatility * 0.1;
-
-      if (invalidated) {
         invalidPois.add(
           poi.id
         );
-
-        continue;
       }
     }
 
-    const expectedDirection:
+    if (
+      !insideTradingSession(
+        closeTime
+      )
+    ) {
+      continue;
+    }
+
+    const bias =
+      biasAt(
+        closeTime,
+        data.h1,
+        structureBias
+      );
+
+    if (bias === "NEUTRAL") {
+      continue;
+    }
+
+    const direction:
       Direction =
         bias === "BULLISH"
           ? "BUY"
@@ -1461,7 +1753,7 @@ export function createLiquidityMssFvgSignals(
             poi.createdTime <
               closeTime &&
             poi.direction ===
-              expectedDirection &&
+              direction &&
             !usedPois.has(
               poi.id
             ) &&
@@ -1495,12 +1787,13 @@ export function createLiquidityMssFvgSignals(
       continue;
     }
 
-    sweeps++;
+    statistics.sweeps++;
 
-    const signal =
+    const attempt =
       createSignalAfterSweep(
         poi,
         candle,
+        index,
         data,
         m5Pivots,
         atrM5,
@@ -1508,22 +1801,39 @@ export function createLiquidityMssFvgSignals(
         pois
       );
 
-    if (!signal) {
-      continue;
+    if (
+      attempt.reachedMss
+    ) {
+      statistics.mss++;
     }
-
-    mss++;
-    fvg++;
 
     if (
-      signal.targetR <
-      MINIMUM_TARGET_R
+      attempt.reachedFvg
     ) {
-      rejectedNoTarget++;
+      statistics.fvg++;
+    }
+
+    if (
+      attempt.reachedRetest
+    ) {
+      statistics.fvgRetests++;
+    }
+
+    incrementRejection(
+      statistics,
+      attempt.rejection
+    );
+
+    if (!attempt.signal) {
       continue;
     }
 
-    signals.push(signal);
+    statistics.entries++;
+
+    signals.push(
+      attempt.signal
+    );
+
     usedPois.add(
       poi.id
     );
@@ -1531,14 +1841,6 @@ export function createLiquidityMssFvgSignals(
 
   return {
     signals,
-    statistics: {
-      pois: pois.length,
-      sweeps,
-      mss,
-      fvg,
-      entries:
-        signals.length,
-      rejectedNoTarget,
-    },
+    statistics,
   };
 }
